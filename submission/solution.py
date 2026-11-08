@@ -811,34 +811,51 @@ class KnowledgeSystem:
             return (start, end) if end >= start else None
 
         cross = defaultdict(list)
+        latest_date = self.snapshots[-1][1] if self.snapshots else None
         for (product, qualifiers, attribute), records in facts.items():
             yr = year_range(product)
             term = re.search(r"\b(\d{2,3}) months?\b", product)
             if not yr or not term:
                 continue
             for record in records:
+                # Cross-page stale traps concern the current site; historical changes
+                # are handled by same-key conflicts below.
+                if record["date"] != latest_date:
+                    continue
+                path = urlparse(record["url"]).path.lower().rstrip("/")
+                if not (path.endswith("/rates") or path.endswith("/auto-loans") or
+                        path.endswith("/auto-motorcycle-loans") or path.endswith("/vehicle-affordability") or
+                        path == "/switch-and-earn"):
+                    continue
                 cross[(record["date"], int(term.group(1)), attribute)].append((yr, product, record))
         cross_conflicts = {}
         for (snap_date, term, attribute), items in cross.items():
-            official = [(yr, prod, rec) for yr, prod, rec in items if rec["rank"] <= 2]
-            stale = [(yr, prod, rec) for yr, prod, rec in items if rec["rank"] > 2]
+            # Collapse duplicate copies of the same model-year row, preferring highest authority.
+            official_by_range, stale_by_range = {}, {}
+            for yr, product, record in items:
+                bucket = official_by_range if record["rank"] <= 2 else stale_by_range
+                existing = bucket.get(yr)
+                if existing is None or (-record["rank"], record["url"]) > (-existing[2]["rank"], existing[2]["url"]):
+                    bucket[yr] = (yr, product, record)
+            official, stale = list(official_by_range.values()), list(stale_by_range.values())
             for yr_s, prod_s, rec_s in stale:
-                # Pair each stale row with the official tier it overlaps most.
-                best, best_overlap = None, 0
+                best, best_year, best_overlap = None, None, 0
                 for yr_o, prod_o, rec_o in official:
                     overlap = min(yr_s[1], yr_o[1]) - max(yr_s[0], yr_o[0]) + 1
                     if prod_o != prod_s and overlap > best_overlap:
-                        best, best_overlap = rec_o, overlap
+                        best, best_year, best_overlap = rec_o, yr_o, overlap
                 if best is None or best_overlap < 2 or best["value"] == rec_s["value"]:
                     continue
-                key = (term, attribute, best["value"], rec_s["value"])
-                if key not in cross_conflicts or snap_date > cross_conflicts[key][0]:
-                    cross_conflicts[key] = (snap_date, best, rec_s)
+                key = (term, attribute, best["value"], rec_s["value"], best_year, yr_s)
+                cross_conflicts[key] = (snap_date, best, rec_s)
 
         conflicts = []
-        for (term, attribute, win_value, lose_value), (_, winner, loser) in cross_conflicts.items():
+        latest_date = self.snapshots[-1][1] if self.snapshots else None
+        for (term, attribute, win_value, lose_value, yr_official, yr_stale), (_, winner, loser) in cross_conflicts.items():
+            official_years = "{}-{}".format(*yr_official)
+            stale_years = "{}-{}".format(*yr_stale)
             conflicts.append(Conflict(
-                topic="{}-month auto loan {} ({} months)".format(term, attribute, term),
+                topic="{}-month auto loan APR (official model years {}; stale model years {})".format(term, official_years, stale_years),
                 values=[lose_value, win_value],
                 sources=[Source(url=loser["url"], snapshot_id=loser["snapshot_id"], quote=loser["quote"][:300]),
                          Source(url=winner["url"], snapshot_id=winner["snapshot_id"], quote=winner["quote"][:300])],
@@ -846,6 +863,9 @@ class KnowledgeSystem:
                 reason="Official rate page is authoritative; the calculator/promotional page shows a stale model-year tier."))
 
         for (product, qualifiers, attribute), records in facts.items():
+            # A conflict is a contradiction in one captured website state. A change
+            # between snapshots is temporal history, not a self-conflict.
+            records = [r for r in records if r["date"] == latest_date]
             best_per_value = {}
             for record in records:
                 previous = best_per_value.get(record["value"])
