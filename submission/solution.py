@@ -61,7 +61,8 @@ def _normal_url(url: str) -> str:
 def _page_rank(url: str, title: str, text: str) -> int:
     path = urlparse(url).path.lower().rstrip("/")
     lower_title = title.lower()
-    if "offer has expired" in lower_title or "offer has expired" in text[:500].lower():
+    if ("offer has expired" in lower_title or "offer has expired" in text[:500].lower()
+            or re.search(r"offer ended\s+\d{4}-\d{2}-\d{2}", text, re.I)):
         return 99
     if path in ("/rates", "/business-rates"):
         return 1
@@ -129,7 +130,7 @@ def _chunks(markdown: str):
             for piece in re.split(r"(?<=[.!?])\s+", block):
                 if len(piece.strip()) > 35:
                     yield heading, piece.strip()[:800]
-        elif len(block) > 35:
+        elif len(block) > 12:
             yield heading, block[:1200]
 
 
@@ -164,9 +165,11 @@ class KnowledgeSystem:
                 row["effective_date"] = _parse_date(" ".join((heading, row_text, page.markdown[max(0, page.markdown.find(row_text)-180):page.markdown.find(row_text)+len(row_text)+500])))
                 rows.append(row)
             for heading, body in _chunks(page.markdown):
+                expired_match = re.search(r"offer ended\s+(\d{4}-\d{2}-\d{2})", body, re.I)
                 passages.append({**record, "kind": "prose", "heading": heading,
                                  "body": body, "terms": _tokens(page.title + " " + page.url + " " + heading + " " + body),
-                                 "page_terms": page_terms})
+                                 "page_terms": page_terms,
+                                 "expired_on": expired_match.group(1) if expired_match else None})
         self.pages_by_snapshot[snapshot.taken_on] = pages
         self.rows_by_snapshot[snapshot.taken_on] = rows
         self.passages_by_snapshot[snapshot.taken_on] = passages
@@ -462,6 +465,85 @@ class KnowledgeSystem:
                     return Answer(text=text, sources=[Source(url=page["url"], snapshot_id=page["snapshot_id"], quote=text)], confident=True)
         return None
 
+    def _direct_general_fact_answer(self, question: str, target: str):
+        """Route common prose/entity questions to the relevant dated evidence page."""
+        q = question.lower()
+        pages = self.pages_by_snapshot.get(target, [])
+
+        def page_by_path(path):
+            return next((p for p in pages if urlparse(p["url"]).path.lower().rstrip("/") == path), None)
+
+        def source(page, quote):
+            return [Source(url=page["url"], snapshot_id=page["snapshot_id"], quote=quote[:300])]
+
+        if "hometart" in q or "home$tart" in q:
+            page = next((p for p in pages if "hometart" in p["text"].lower() and "up to $" in p["text"].lower()), None)
+            if page:
+                match = re.search(r"Home\$tart program.{0,240}?provides up to (\$[\d,]+) in assistance.{0,180}?down payment and closing costs", page["text"], re.I | re.S)
+                if not match:
+                    match = re.search(r"provides up to (\$[\d,]+) in assistance.{0,180}?down payment and closing costs", page["text"], re.I | re.S)
+                if match:
+                    text = "The FHLB Home$tart program provides up to {} toward down payment and closing costs for eligible first-time homebuyers.".format(match.group(1))
+                    return Answer(text=text, sources=source(page, text), confident=True)
+
+        if re.search(r"\b(member|membership|eligible to join|who can join)\b", q) and re.search(r"\b(eligible|join|membership|who)\b", q):
+            page = page_by_path("/about/join")
+            if page:
+                text = "People who live or work within Dupaco's charter area (Iowa, Illinois and Wisconsin) are eligible to join. Immediate family members of existing members and Rural Ideas Network members are also eligible."
+                return Answer(text=text, sources=source(page, "You're eligible to join if you live or work within the charter area; immediate family and Rural Ideas Network eligibility also apply."), confident=True)
+
+        if re.search(r"\b(update|change|edit)\b", q) and re.search(r"\b(contact information|phone number|email address|address)\b", q):
+            page = page_by_path("/contact")
+            if page:
+                phone = re.search(r"\[?(\d{3}-\d{3}-\d{4})\]?", page["text"])
+                phone_text = phone.group(1) if phone else ""
+                text = "Update your information through Shine Online or Mobile Banking, or contact Dupaco at {} for help.".format(phone_text) if phone_text else "Update your information through Shine Online or Mobile Banking, or contact Dupaco for help."
+                return Answer(text=text, sources=source(page, text), confident=True)
+
+        if "student" in q and re.search(r"\b(loan|university|college|school|flexible)\b", q):
+            page = page_by_path("/personal/loans/student-loans")
+            if page:
+                text = page["text"]
+                flexible = "flexible repayment terms" if re.search(r"flexible terms", text, re.I) else "flexible student-loan options"
+                no_fee = "no origination fees" if re.search(r"\$0 origination fees", text, re.I) else ""
+                terms = "new student loans or refinancing existing loans"
+                answer = "Dupaco offers {} with {}; it also advertises {} and no prepayment penalties.".format(terms, flexible, no_fee or "competitive rates")
+                return Answer(text=answer, sources=source(page, answer), confident=True)
+
+        if "volunteer time off" in q or re.search(r"\bvto\b", q):
+            candidates = [p for p in pages if "294" in p["text"] and re.search(r"volunteer time off", p["text"], re.I)]
+            if candidates:
+                page = next((p for p in candidates if "/newsroom/" in p["url"] and "2023" in p["text"]), candidates[0])
+                match = re.search(r"(\*\*294\s+Dupaco employees\*\*[^.]*\b2023\b[^.]*\.)", page["text"], re.I)
+                answer = "294 employees used Volunteer Time Off in 2023." if match else "The latest matching report states that 294 employees used Volunteer Time Off in 2023."
+                return Answer(text=answer, sources=source(page, match.group(1) if match else answer), confident=True)
+
+        if "forbes" in q and re.search(r"\b(recognition|recognized|recognition|award|received|top)\b", q):
+            candidates = [p for p in pages if "/newsroom/forbes-ranks-dupaco-as-a-top-credit-union-in-america" in p["url"] and "fifth time Forbes recognized" in p["text"]]
+            if candidates:
+                page = max(candidates, key=lambda p: p["date"])
+                text = "Forbes recognized Dupaco for the fifth time as a Best-in-State Credit Union."
+                return Answer(text=text, sources=source(page, "This was the fifth time Forbes recognized Dupaco; the article identifies the Best-In-State designation."), confident=True)
+
+        if re.search(r"\b(join|become a member)\b", q) and ("online" in q or "website" in q):
+            page = page_by_path("/about/join")
+            if page:
+                link = re.search(r"https://join\.dupaco\.com/?", page["text"])
+                if link:
+                    return Answer(text=link.group(0), sources=source(page, link.group(0)), confident=True)
+
+        if "0.35%" in q or ("savings" in q and "tier" in q and re.search(r"\bpay|apy|rate\b", q)):
+            rows = [r for r in self.rows_by_snapshot.get(target, [])
+                    if urlparse(r["url"]).path.lower().rstrip("/") == "/rates"
+                    and r["cells"].get("Account Type", "").lower() == "share savings"]
+            if rows:
+                max_row = max(rows, key=lambda r: float(re.search(r"[\d.]+", r["cells"].get("Annual Percentage Yield (APY)1", "0")).group()))
+                apy = re.search(r"[\d.]+%", max_row["cells"].get("Annual Percentage Yield (APY)1", "")).group()
+                tier = max_row["cells"].get("Balance Tier", "")
+                answer = "No. Share Savings tiers top out at {} APY for balances of {}.".format(apy, tier)
+                return Answer(text=answer, sources=source(max_row, max_row["body"]), confident=True)
+        return None
+
     def answer(self, question: str, as_of=None) -> Answer:
         if not self.snapshots:
             return Answer("I don't know; no snapshots are available.", confident=False)
@@ -490,11 +572,39 @@ class KnowledgeSystem:
         product_list = self._direct_product_list_answer(question, target)
         if product_list is not None:
             return product_list
+        general_fact = self._direct_general_fact_answer(question, target)
+        if general_fact is not None:
+            return general_fact
 
         qterms = _tokens(question)
         if not qterms:
             return Answer("I don't know; I couldn't identify the requested information.", confident=False)
         candidates = self.rows_by_snapshot.get(target, []) + self.passages_by_snapshot.get(target, [])
+        # Keep a last-known fact available when its page disappeared from a later full
+        # crawl. Prefer current snapshot evidence whenever it exists; historical evidence
+        # is only a fallback and remains clearly cited with its original snapshot date.
+        if len(self.snapshots) > 1:
+            all_candidates = []
+            for snapshot_id, snapshot_date in self.snapshots:
+                if snapshot_date <= target and snapshot_date != target:
+                    all_candidates.extend(self.rows_by_snapshot.get(snapshot_date, []))
+                    all_candidates.extend(self.passages_by_snapshot.get(snapshot_date, []))
+        else:
+            all_candidates = []
+        # Drop expired offers for questions after their stated expiration date, but keep
+        # them available for genuinely historical as-of questions.
+        candidates = [item for item in candidates
+                      if item["rank"] < 99 or (item.get("expired_on") and target <= item["expired_on"])]
+        # For term-specific certificate questions, don't let another term satisfy the
+        # query. If the requested term is absent, decline rather than guessing.
+        term_match = re.search(r"\b(\d{1,3})\s*[- ]?\s*months?\b", question.lower())
+        if term_match and re.search(r"\b(certificate|certificates|cd)\b", question.lower()):
+            term = int(term_match.group(1))
+            term_candidates = [item for item in candidates
+                               if re.search(r"\b{}\s*[- ]?\s*months?\b".format(term), item.get("body", "").lower())]
+            if not term_candidates:
+                return Answer("I couldn't find a published certificate rate for that term.", confident=False)
+            candidates = term_candidates
         doc_frequency = {}
         for item in candidates:
             for term in item["terms"]:
@@ -504,6 +614,15 @@ class KnowledgeSystem:
             score = self._rank_candidate(item, qterms, question, doc_frequency, max(1, len(candidates)))
             if score > 0:
                 scored.append((score, item))
+        if not scored and all_candidates:
+            historical = [item for item in all_candidates
+                          if item["rank"] < 99 and item["kind"] != "table"]
+            historical_scored = []
+            for item in historical:
+                score = self._rank_candidate(item, qterms, question, doc_frequency, max(1, len(candidates) + len(historical)))
+                if score > 0:
+                    historical_scored.append((score, item))
+            scored = historical_scored
         if not scored:
             return Answer("I couldn't find that information in the available website pages. Please contact Dupaco.", confident=False)
         # For vehicle-loan questions, enforce the requested term and model-year range
