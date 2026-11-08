@@ -45,6 +45,7 @@ From the repository root:
 python3 -m unittest submission.test_regressions
 python3 harness/run_eval.py --submission submission --snapshots harness/selftest/snapshots --eval harness/selftest/eval.jsonl --conflicts-gold harness/selftest/conflicts_gold.json
 python3 harness/run_eval.py --submission submission --eval eval/public_eval.jsonl
+python3 harness/run_eval.py --submission submission --eval dev/holdout_eval.jsonl
 ```
 
 The assignment grader uses Python 3.11. The regression tests, bundled self-test and public eval have been run locally with Python 3.11.

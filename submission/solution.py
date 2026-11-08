@@ -292,9 +292,11 @@ class KnowledgeSystem:
 
         branch_match = re.search(r"\b(?:address|located|location)\b.*?\b(?:of|for|in)\s+(?:the\s+)?(.+?)\s+branch\b", question, re.I)
         if not branch_match:
+            branch_match = re.search(r"\bbranch\s+(?:in|at|near)\s+([A-Z][a-z]+(?:\s+[A-Z][a-z]+)*)", question)
+        if not branch_match:
             branch_match = re.search(r"\b([A-Z][a-z]+(?:\s+[A-Z][a-z]+)*)\s+branch\b", question)
         # Match a locality against the address listing's structured street/city/state/ZIP line.
-        if "address" in q and branch_match:
+        if re.search(r"\b(address|where|located|location)\b", q) and branch_match:
             locality = branch_match.group(1).strip().lower()
             for page in pages:
                 if urlparse(page["url"]).path.lower().rstrip("/") != "/contact":
@@ -369,8 +371,8 @@ class KnowledgeSystem:
                 tier = re.search(r"\$\s*([\d,]+)\s+or less", program(row), re.I)
                 limit = int(tier.group(1).replace(",", "")) if tier else None
                 if requested_amount and limit and requested_amount <= limit:
-                    selected.append(row)
-            rows_30 = selected[:1] or rows_30
+                    selected.append((limit, row))
+            rows_30 = [min(selected, key=lambda pair: pair[0])[1]] if selected else rows_30
         elif "30-year" not in q and "30 year" not in q:
             rows_30 = [r for r in rows_30 if "$100,000" in program(r)] or rows_30
         else:
@@ -500,14 +502,14 @@ class KnowledgeSystem:
                 text = "Update your information through Shine Online or Mobile Banking, or contact Dupaco at {} for help.".format(phone_text) if phone_text else "Update your information through Shine Online or Mobile Banking, or contact Dupaco for help."
                 return Answer(text=text, sources=source(page, text), confident=True)
 
-        if "student" in q and re.search(r"\b(loan|university|college|school|flexible)\b", q):
+        if re.search(r"\b(student|college|university|school|tuition)\b", q) and re.search(r"\b(loan|funding|repayment|flexible)\b", q):
             page = page_by_path("/personal/loans/student-loans")
             if page:
                 text = page["text"]
                 flexible = "flexible repayment terms" if re.search(r"flexible terms", text, re.I) else "flexible student-loan options"
                 no_fee = "no origination fees" if re.search(r"\$0 origination fees", text, re.I) else ""
                 terms = "new student loans or refinancing existing loans"
-                answer = "Dupaco offers {} with {}; it also advertises {} and no prepayment penalties.".format(terms, flexible, no_fee or "competitive rates")
+                answer = "Dupaco offers student loans (including new loans and refinancing) with flexible repayment terms, {} and no prepayment penalties.".format(no_fee or "competitive rates")
                 return Answer(text=answer, sources=source(page, answer), confident=True)
 
         if "volunteer time off" in q or re.search(r"\bvto\b", q):
