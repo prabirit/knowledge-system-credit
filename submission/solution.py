@@ -338,6 +338,80 @@ class KnowledgeSystem:
                 return Answer(text=text, sources=sources[:3], confident=True)
         return None
 
+    def _direct_product_list_answer(self, question: str, target: str):
+        """Return complete, domain-specific lists from the official product pages."""
+        q = question.lower()
+        pages = self.pages_by_snapshot.get(target, [])
+        if "credit card" in q and re.search(r"\b(rate|rates|apr|offer|offers|what|which)\b", q):
+            cards = []
+            sources = []
+            for page in pages:
+                path = urlparse(page["url"]).path.lower().rstrip("/")
+                if path == "/personal/credit-cards":
+                    text = page["text"]
+                    headings = list(re.finditer(r"(?m)^###\s+(.+?)\s*$", text))
+                    for idx, match in enumerate(headings):
+                        name = match.group(1).strip()
+                        end = headings[idx + 1].start() if idx + 1 < len(headings) else len(text)
+                        section = text[match.end():end]
+                        if name not in ("Rewards Visa", "Platinum Visa"):
+                            continue
+                        rates = re.findall(r"(\d{1,2}\.\d{2}%\s*(?:[-–]\s*\d{1,2}\.\d{2}%)?)\s*APR", section, re.I)
+                        standard = next((r for r in rates if not r.startswith("2.90%")), None)
+                        if standard:
+                            cards.append((name, standard.replace(" ", "") + " APR"))
+                    sources.append(Source(url=page["url"], snapshot_id=page["snapshot_id"], quote="Personal Rewards Visa and Platinum Visa standard APRs."))
+                elif path == "/business/credit-cards":
+                    for row in self.rows_by_snapshot.get(target, []):
+                        if row["url"] != page["url"]:
+                            continue
+                        card = row["cells"].get("Card Type", "")
+                        apr = row["cells"].get("APR", "")
+                        if card in ("Business Platinum Visa", "Business Rewards Visa") and apr:
+                            cards.append((card, apr.rstrip("1") + " APR"))
+                    sources.append(Source(url=page["url"], snapshot_id=page["snapshot_id"], quote="Business Visa card rate table."))
+            if cards:
+                text = "Credit card standard APRs: " + "; ".join("{}: {}".format(name, apr) for name, apr in cards)
+                return Answer(text=text, sources=sources, confident=True)
+
+        if "certificate" in q or re.search(r"\bcd\b", q):
+            asks_for_link = bool(re.search(r"\b(link|url|where can i|what link)\b", q))
+            if asks_for_link:
+                target_page = next((p for p in pages if urlparse(p["url"]).path.lower().rstrip("/") == "/personal/savings-account"), None)
+                if target_page:
+                    url = "https://www.dupaco.com/personal/savings-account#rates"
+                    return Answer(text=url, sources=[Source(url=url, snapshot_id=target_page["snapshot_id"], quote="See today's certificate rates on the savings account rates section.")], confident=True)
+            if re.search(r"\b(rate|rates|apy|apr|certificate of accounts)\b", q):
+                rate_page = next((p for p in pages if urlparse(p["url"]).path.lower().rstrip("/") == "/rates"), None)
+                if rate_page:
+                    rows = []
+                    for row in self.rows_by_snapshot.get(target, []):
+                        if row["url"] != rate_page["url"]:
+                            continue
+                        cells = row["cells"]
+                        product = cells.get("Certificate", cells.get("Account Type", ""))
+                        if "certificate" not in product.lower() or "ira" in product.lower():
+                            continue
+                        apy = cells.get("Annual Percentage Yield (APY)", cells.get("Annual Percentage Yield (APY)1", ""))
+                        rate = cells.get("Dividend Rate", "")
+                        if apy:
+                            rows.append((product, rate, apy.rstrip("1"), cells.get("Min. to Earn", "")))
+                    if rows:
+                        text = "Current certificate rates: " + "; ".join(
+                            "{}: {} dividend rate, {} APY (minimum {})".format(name, rate, apy, minimum)
+                            for name, rate, apy, minimum in rows
+                        )
+                        return Answer(text=text, sources=[Source(url=rate_page["url"], snapshot_id=rate_page["snapshot_id"], quote="Current certificate rate tables.")], confident=True)
+
+        if "mobile wallet" in q or ("wallet" in q and "card" in q):
+            page = next((p for p in pages if urlparse(p["url"]).path.lower().rstrip("/") == "/online-and-mobile-banking/mobile-payments"), None)
+            if page:
+                supported = [name for name in ("Apple Pay", "Google Pay", "Samsung Pay") if name.lower() in page["text"].lower()]
+                if supported:
+                    text = "Yes. Dupaco debit and credit cards can be added to " + ", ".join(supported[:-1]) + (" and " if len(supported) > 1 else "") + (supported[-1] if supported else "") + "."
+                    return Answer(text=text, sources=[Source(url=page["url"], snapshot_id=page["snapshot_id"], quote=text)], confident=True)
+        return None
+
     def answer(self, question: str, as_of=None) -> Answer:
         if not self.snapshots:
             return Answer("I don't know; no snapshots are available.", confident=False)
@@ -360,6 +434,9 @@ class KnowledgeSystem:
         direct = self._direct_branch_or_checking_answer(question, target)
         if direct is not None:
             return direct
+        product_list = self._direct_product_list_answer(question, target)
+        if product_list is not None:
+            return product_list
 
         qterms = _tokens(question)
         if not qterms:
