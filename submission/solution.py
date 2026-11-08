@@ -265,6 +265,88 @@ class KnowledgeSystem:
                         return True
         return False
 
+    def _direct_rate_lookup_answer(self, question: str, target: str):
+        """Look up (a) personal-loan APR by term and (b) a named deposit product, choosing the
+        balance tier that contains any dollar amount in the question."""
+        q = question.lower()
+        qn = re.sub(r"[\u2019']", "", q).replace("-", " ")
+        rate_words = re.search(r"\b(rate|rates|apy|apr|interest|dividend|earn|pay|pays|yield)\b", q)
+        rows = self.rows_by_snapshot.get(target, [])
+
+        # (a) personal loan APR by term
+        term = re.search(r"\b(\d{1,3})\s*[- ]?\s*months?\b", q)
+        if "personal loan" in q and term and rate_words:
+            wanted = int(term.group(1))
+            for row in rows:
+                if urlparse(row["url"]).path.lower().rstrip("/") != "/personal/loans/personal-loans" or not row.get("cells"):
+                    continue
+                cells = list(row["cells"].values())
+                if re.fullmatch(r"{}\s+months?".format(wanted), cells[0].strip(), re.I) and len(cells) > 1:
+                    apr = re.search(r"\d+(?:\.\d+)?\s?%", cells[1])
+                    if apr:
+                        text = "Personal loan APR for a {}-month term: {} APR (as low as, based on credit qualification).".format(wanted, apr.group(0).replace(" ", ""))
+                        return Answer(text=text, sources=[Source(url=row["url"], snapshot_id=row["snapshot_id"], quote=row["body"][:200])], confident=True)
+            return Answer("The website doesn't list a personal loan rate for a {}-month term. Please contact Dupaco.".format(wanted), confident=False)
+
+        # (b) named deposit product on the consumer rate sheet
+        if not rate_words or "business" in q:
+            return None
+        products = {}
+        for row in rows:
+            if urlparse(row["url"]).path.lower().rstrip("/") != "/rates" or not row.get("cells"):
+                continue
+            cells = row["cells"]
+            name = cells.get("Account Type")
+            if not name or "Balance Tier" not in cells:
+                continue
+            low = re.sub(r"[\u2019']", "", name.lower()).replace("-", " ")
+            if re.search(r"certificate|\bira\b|roth|traditional|^\d+\s*month", low):
+                continue
+            products.setdefault(low, (name, []))[1].append(row)
+        named = [(low, v) for low, v in products.items() if low in qn]
+        if not named:
+            return None
+        low, (name, prows) = max(named, key=lambda kv: len(kv[0]))
+
+        def tier_bounds(cell):
+            nums = [float(x.replace(",", "")) for x in re.findall(r"\$\s?([\d,]+(?:\.\d+)?)", cell)]
+            if not nums:
+                return None
+            if "+" in cell or len(nums) == 1:
+                return (nums[0], float("inf"))
+            return (nums[0], nums[1])
+
+        amounts = [float(a.replace(",", "")) for a in re.findall(r"\$\s?([\d,]+(?:\.\d+)?)", q)]
+        chosen = None
+        if amounts:
+            hit_rows = []
+            for amount in amounts:
+                match = [r for r in prows if (b := tier_bounds(r["cells"].get("Balance Tier", ""))) and b[0] <= amount <= b[1]]
+                hit_rows.append(match[0] if match else None)
+            if hit_rows and all(h is not None and h is hit_rows[0] for h in hit_rows):
+                chosen = hit_rows[0]
+            else:
+                return None
+        elif len(prows) == 1:
+            chosen = prows[0]
+        elif re.search(r"\b(highest|top|maximum|best)\b", q):
+            def apy_of(r):
+                m = re.search(r"\d+(?:\.\d+)?", next((v for k, v in r["cells"].items() if "apy" in k.lower()), "0"))
+                return float(m.group(0)) if m else 0.0
+            chosen = max(prows, key=apy_of)
+        else:
+            return None
+        cells = chosen["cells"]
+        apy = next((v for k, v in cells.items() if "apy" in k.lower()), "")
+        dividend = cells.get("Dividend Rate", "")
+        clean = lambda v: re.sub(r"(%)\d+$", r"\1", (v or "").strip())
+        tier = cells.get("Balance Tier", "")
+        if "dividend" in q:
+            text = "{} dividend rate for balances of {}: {}.".format(name, tier, clean(dividend))
+        else:
+            text = "{} APY for balances of {}: {}.".format(name, tier, clean(apy))
+        return Answer(text=text, sources=[Source(url=chosen["url"], snapshot_id=chosen["snapshot_id"], quote=chosen["body"][:250])], confident=True)
+
     def _direct_branch_or_checking_answer(self, question: str, target: str):
         """Answer common branch/location and checking-rate intents from grounded evidence."""
         q = question.lower()
@@ -290,24 +372,30 @@ class KnowledgeSystem:
                         sources.append(Source(url=row["url"], snapshot_id=row["snapshot_id"], quote=row["body"][:300]))
                 return Answer(text=text, sources=sources, confident=True)
 
-        branch_match = re.search(r"\b(?:address|located|location)\b.*?\b(?:of|for|in)\s+(?:the\s+)?(.+?)\s+branch\b", question, re.I)
-        if not branch_match:
-            branch_match = re.search(r"\bbranch\s+(?:in|at|near)\s+([A-Z][a-z]+(?:\s+[A-Z][a-z]+)*)", question)
-        if not branch_match:
-            branch_match = re.search(r"\b([A-Z][a-z]+(?:\s+[A-Z][a-z]+)*)\s+branch\b", question)
-        # Match a locality against the address listing's structured street/city/state/ZIP line.
-        if re.search(r"\b(address|where|located|location)\b", q) and branch_match:
-            locality = branch_match.group(1).strip().lower()
+        # Branch / ATM street address: match a city or street name from the structured
+        # location listing on the contact page against the question.
+        if re.search(r"\b(address|where|located|location|street)\b", q) and re.search(r"\b(branch|office|atm|located|address)\b", q):
+            wants_atm = "atm" in q
             for page in pages:
                 if urlparse(page["url"]).path.lower().rstrip("/") != "/contact":
                     continue
-                for line in page["text"].splitlines():
-                    if locality not in line.lower():
+                lines = page["text"].splitlines()
+                entries = []
+                for i, line in enumerate(lines):
+                    m = re.match(r"^(\d+\s+([^,]+)),\s*([^,]+),\s*([A-Z]{2}),\s*(\d{5})\s*$", line.strip())
+                    if not m:
                         continue
-                    address = re.search(r"(\d+\s+[^,\n]+,\s*" + re.escape(locality) + r",\s*[A-Z]{2},\s*\d{5})", line, re.I)
-                    if address:
-                        value = re.sub(r"\s+", " ", address.group(1)).strip()
-                        return Answer(text=value, sources=[Source(url=page["url"], snapshot_id=page["snapshot_id"], quote=value)], confident=True)
+                    label = " ".join(l.strip() for l in lines[max(0, i - 3):i] if l.strip())
+                    is_atm = "atm" in label.lower() and "branch" not in label.lower()
+                    street_name = re.sub(r"\s+(?:st|street|ave|avenue|rd|road|dr|drive|ln|lane|blvd|way|ct|pkwy)\.?$", "", m.group(2).strip(), flags=re.I)
+                    entries.append({"full": "{}, {}, {} {}".format(m.group(1).strip(), m.group(3).strip(), m.group(4), m.group(5)),
+                                    "city": m.group(3).strip().lower(), "street": street_name.lower(), "atm": is_atm})
+                street_hits = [e for e in entries if e["street"] and re.search(r"\b{}\b".format(re.escape(e["street"])), q) and (wants_atm or not e["atm"])]
+                city_hits = [e for e in entries if re.search(r"\b{}\b".format(re.escape(e["city"])), q) and (wants_atm or not e["atm"])]
+                hits = street_hits or city_hits
+                if hits:
+                    value = "; ".join(sorted({e["full"] for e in hits}))
+                    return Answer(text=value, sources=[Source(url=page["url"], snapshot_id=page["snapshot_id"], quote=value[:250])], confident=True)
 
         if re.search(r"\b(lobby|drive[- ]?up)\s+hours\b|\bhours\s+(?:for|of)\s+(?:the\s+)?(?:lobby|drive[- ]?up)\b", q):
             drive = bool(re.search(r"drive[- ]?up", q))
@@ -348,13 +436,15 @@ class KnowledgeSystem:
         q = question.lower()
         if not re.search(r"\b(mortgage|home loan)\b", q) or not re.search(r"\b(rate|rates|interest|apr)\b", q):
             return None
+        # Older snapshots label this column "Term" instead of "Program", so use the first cell.
+        first = lambda r: next(iter(r["cells"].values()), "") if r.get("cells") else ""
         rate_rows = [r for r in self.rows_by_snapshot.get(target, [])
                      if urlparse(r["url"]).path.lower().rstrip("/") == "/rates"
-                     and r["cells"].get("Program", "").lower().startswith("purchase:")
-                     and "year fixed conventional" in r["cells"].get("Program", "").lower()]
+                     and first(r).lower().startswith("purchase:")
+                     and "year fixed conventional" in first(r).lower()]
         if not rate_rows:
             return None
-        program = lambda r: r["cells"].get("Program", "")
+        program = first
         rate = lambda r: r["cells"].get("Rate", "")
         apr = lambda r: r["cells"].get("APR", "")
         rows_30 = [r for r in rate_rows if "30-year" in program(r).lower()]
@@ -397,7 +487,9 @@ class KnowledgeSystem:
         """Return complete, domain-specific lists from the official product pages."""
         q = question.lower()
         pages = self.pages_by_snapshot.get(target, [])
-        if "credit card" in q and re.search(r"\b(rate|rates|apr|offer|offers|what|which)\b", q):
+        if (("credit card" in q or re.search(r"\b(platinum|rewards)\s+visa\b", q) or re.search(r"\bvisa\b.*\b(apr|interest|rate)\b", q))
+                and re.search(r"\b(rate|rates|apr|offer|offers|what|which|interest)\b", q)
+                and not re.search(r"intro|balance transfer|lost|stolen|point|redeem|cash advance|fee|terms|wallet|apple|google|samsung|debit|pay\b", q)):
             cards = []
             sources = []
             for page in pages:
@@ -425,11 +517,16 @@ class KnowledgeSystem:
                         if card in ("Business Platinum Visa", "Business Rewards Visa") and apr:
                             cards.append((card, apr.rstrip("1") + " APR"))
                     sources.append(Source(url=page["url"], snapshot_id=page["snapshot_id"], quote="Business Visa card rate table."))
+            named = [c for c in cards if (("platinum" in q) == ("platinum" in c[0].lower()) or "platinum" not in q)
+                     and (("rewards" in q) == ("rewards" in c[0].lower()) or "rewards" not in q)
+                     and (("business" in q) == ("business" in c[0].lower()) or ("platinum" not in q and "rewards" not in q))]
+            if ("platinum" in q or "rewards" in q) and named:
+                cards = named
             if cards:
                 text = "Credit card standard APRs: " + "; ".join("{}: {}".format(name, apr) for name, apr in cards)
                 return Answer(text=text, sources=sources, confident=True)
 
-        if "certificate" in q or re.search(r"\bcd\b", q):
+        if "certificate" in q or re.search(r"\bcd\b", q) or (re.search(r"\bspecial\b", q) and re.search(r"\b\d+\s*[- ]?\s*months?\b", q)):
             asks_for_link = bool(re.search(r"\b(link|url|where can i|what link)\b", q))
             if asks_for_link:
                 target_page = next((p for p in pages if urlparse(p["url"]).path.lower().rstrip("/") == "/personal/savings-account"), None)
@@ -440,23 +537,37 @@ class KnowledgeSystem:
                 rate_page = next((p for p in pages if urlparse(p["url"]).path.lower().rstrip("/") == "/rates"), None)
                 if rate_page:
                     rows = []
+                    seen = set()
                     for row in self.rows_by_snapshot.get(target, []):
-                        if row["url"] != rate_page["url"]:
+                        if row["url"] != rate_page["url"] or not row.get("cells"):
                             continue
                         cells = row["cells"]
-                        product = cells.get("Certificate", cells.get("Account Type", ""))
-                        if "certificate" not in product.lower() or "ira" in product.lower():
+                        product = next(iter(cells.values()), "")
+                        low = product.lower()
+                        is_cert = "certificate" in low or re.match(r"^\d+\s+months?$", low)
+                        if not is_cert or "ira" in low or "roth" in low or "traditional" in low:
                             continue
-                        apy = cells.get("Annual Percentage Yield (APY)", cells.get("Annual Percentage Yield (APY)1", ""))
+                        apy = next((v for k, v in cells.items() if "apy" in k.lower() or "yield" in k.lower()), "")
                         rate = cells.get("Dividend Rate", "")
-                        if apy:
-                            rows.append((product, rate, apy.rstrip("1"), cells.get("Min. to Earn", "")))
+                        minimum = next((v for k, v in cells.items() if "min" in k.lower()), "")
+                        if apy and product not in seen:
+                            seen.add(product)
+                            rows.append((product, rate, re.sub(r"(%)\d+$", r"\1", apy.strip()), minimum))
+                    # Narrow to the requested term / jumbo / special when the question names them.
+                    term_match = re.search(r"\b(\d{1,3})\s*[- ]?\s*(?:months?|mo)\b", q)
+                    if term_match:
+                        term = term_match.group(1)
+                        rows = [r for r in rows if re.match(r"^{}\s+months?\b".format(term), r[0].lower())]
+                        if not rows:
+                            return Answer("The website doesn't list a {}-month certificate rate. Please contact Dupaco.".format(term), confident=False)
+                        if "jumbo" in q:
+                            rows = [r for r in rows if "jumbo" in r[0].lower()] or rows
+                        else:
+                            rows = [r for r in rows if "jumbo" not in r[0].lower()] or rows
                     if rows:
-                        text = "Current certificate rates: " + "; ".join(
-                            "{}: {} dividend rate, {} APY (minimum {})".format(name, rate, apy, minimum)
-                            for name, rate, apy, minimum in rows
-                        )
-                        return Answer(text=text, sources=[Source(url=rate_page["url"], snapshot_id=rate_page["snapshot_id"], quote="Current certificate rate tables.")], confident=True)
+                        text = "Current certificate rates: " if not term_match else "Certificate rate: "
+                        text += "; ".join("{}: {} dividend rate, {} APY (minimum {})".format(n, r, a, m) for n, r, a, m in rows)
+                        return Answer(text=text, sources=[Source(url=rate_page["url"], snapshot_id=rate_page["snapshot_id"], quote="Certificate rate tables.")], confident=True)
 
         if "mobile wallet" in q or ("wallet" in q and "card" in q):
             page = next((p for p in pages if urlparse(p["url"]).path.lower().rstrip("/") == "/online-and-mobile-banking/mobile-payments"), None)
@@ -494,6 +605,45 @@ class KnowledgeSystem:
                 text = "People who live or work within Dupaco's charter area (Iowa, Illinois and Wisconsin) are eligible to join. Immediate family members of existing members and Rural Ideas Network members are also eligible."
                 return Answer(text=text, sources=source(page, "You're eligible to join if you live or work within the charter area; immediate family and Rural Ideas Network eligibility also apply."), confident=True)
 
+        if (re.search(r"\b(phone|telephone|call)\b", q) and re.search(r"\b(dupaco|you|your|us)\b", q)
+                and not re.search(r"\b(lost|stolen|card|loan|mortgage|hsa|insurance|business|update|change|edit|ext|extension)\b", q)):
+            page = page_by_path("/contact")
+            if page:
+                phone = re.search(r"\*\*Phone:\*\*\s*\[?(\d{3}-\d{3}-\d{4})", page["text"]) or re.search(r"\[?(\d{3}-\d{3}-\d{4})\]?", page["text"])
+                if phone:
+                    text = "You can reach Dupaco at {}.".format(phone.group(1))
+                    return Answer(text=text, sources=source(page, text), confident=True)
+
+        if re.search(r"\b(url|link|locator|website|web page|webpage)\b", q) and re.search(r"\b(branch|atm|locator|location)\b", q) \
+                and not re.search(r"\b(hours?|open|close|closing|address|members?)\b", q):
+            page = page_by_path("/contact")
+            if page:
+                url = "https://www.dupaco.com/contact"
+                return Answer(text=url, sources=source(page, "Find a branch, ATM or live video teller on the contact page."), confident=True)
+
+        named_branch = re.search(r"([A-Z][\w-]+(?:\s[A-Z][\w-]+)*)\s+(?:branch|location)\b", question)
+        if named_branch and re.search(r"\b(close|closes|closed|closing|closure|still|operating|open|members|go|after|instead)\b", q) \
+                and not re.search(r"\b(hours?|lobby|drive[- ]?up)\b", q):
+            name = named_branch.group(1)
+            closing = []
+            for p in pages:
+                if name.lower() in p["text"].lower():
+                    for m in re.finditer(r"(?:will|to|scheduled to)\s+close\s+(?:on\s+)?([A-Z][a-z]+\s+\d{1,2},\s+\d{4})", p["text"]):
+                        closing.append((p, m.group(1)))
+            if closing:
+                page, date_text = max(closing, key=lambda pm: ("closure" in pm[0]["url"], pm[0]["date"]))
+                alt = re.search(r"([^.\u201d\"]*full-service branches at[^.]*\.)", page["text"])
+                if re.search(r"\b(members|go|where|instead|full-service)\b", q) and alt:
+                    text = alt.group(1).strip()
+                else:
+                    from datetime import datetime
+                    try:
+                        closed = datetime.strptime(date_text, "%B %d, %Y").date().isoformat() <= target
+                    except ValueError:
+                        closed = False
+                    text = "The {} branch {} {}.".format(name, "closed on" if closed else "is scheduled to close on", date_text)
+                return Answer(text=text, sources=source(page, text), confident=True)
+
         if re.search(r"\b(update|change|edit)\b", q) and re.search(r"\b(contact information|phone number|email address|address)\b", q):
             page = page_by_path("/contact")
             if page:
@@ -506,6 +656,8 @@ class KnowledgeSystem:
             page = page_by_path("/personal/loans/student-loans")
             if page:
                 text = page["text"]
+                if re.search(r"\b(apr|rate|rates|interest)\b", q) and not re.search(r"\d\.\d+\s?%", text):
+                    return Answer("The website doesn't publish a student loan rate. Please contact Dupaco.", confident=False)
                 flexible = "flexible repayment terms" if re.search(r"flexible terms", text, re.I) else "flexible student-loan options"
                 no_fee = "no origination fees" if re.search(r"\$0 origination fees", text, re.I) else ""
                 terms = "new student loans or refinancing existing loans"
@@ -527,7 +679,7 @@ class KnowledgeSystem:
                 text = "Forbes recognized Dupaco for the fifth time as a Best-in-State Credit Union."
                 return Answer(text=text, sources=source(page, "This was the fifth time Forbes recognized Dupaco; the article identifies the Best-In-State designation."), confident=True)
 
-        if re.search(r"\b(join|become a member)\b", q) and ("online" in q or "website" in q):
+        if re.search(r"\b(join|become (?:a |an )?(?:dupaco )?(?:new )?member)\b", q) and re.search(r"\b(online|website|link|url)\b", q):
             page = page_by_path("/about/join")
             if page:
                 link = re.search(r"https://join\.dupaco\.com/?", page["text"])
@@ -565,6 +717,9 @@ class KnowledgeSystem:
             return Answer("I don't have a website snapshot from that date, so I can't confirm.", confident=False)
         if self._should_decline_unsupported_specifics(question, target):
             return Answer("The website doesn't list that information. Please contact a Dupaco lender or branch for help.", confident=False)
+        rate_lookup = self._direct_rate_lookup_answer(question, target)
+        if rate_lookup is not None:
+            return rate_lookup
         direct = self._direct_branch_or_checking_answer(question, target)
         if direct is not None:
             return direct
@@ -647,6 +802,9 @@ class KnowledgeSystem:
                         continue
                     ranges = RANGE_RE.findall(body)
                     in_year_range = False
+                    older = re.search(r"(\d{4})\s+Model Year\s*\(and older\)", body, re.I)
+                    if older and requested_year <= int(older.group(1)):
+                        in_year_range = True
                     for start_s, end_s in ranges:
                         start, end = int(start_s), int(end_s)
                         if end < 100:
