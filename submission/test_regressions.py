@@ -41,6 +41,22 @@ class ConflictRegressionTests(unittest.TestCase):
         answer = self.system.answer("What is the 60-month jumbo certificate rate?")
         self.assertFalse(answer.confident)
 
+    def test_certificate_list_question_returns_all_current_terms(self):
+        """The public scorer has no must-include tokens for this item, so test completeness directly."""
+        system = build()
+        latest = load_snapshots(ROOT / "snapshots")[-1]
+        system.ingest(latest)
+        answer = system.answer("Get me the rate for the certificate of accounts.")
+        for term in ("17 Month Fixed Jumbo", "17 Month Fixed Certificate",
+                     "10 Month Fixed Jumbo", "10 Month Fixed Certificate",
+                     "60 Month", "48 Month", "36 Month", "30 Month", "24 Month",
+                     "18 Month", "12 Month", "6 Month"):
+            with self.subTest(term=term):
+                self.assertIn(term, answer.text)
+        self.assertNotIn("Which certificate term would you like", answer.text)
+        self.assertEqual(len(answer.sources), 1)
+        self.assertTrue(answer.sources[0].url.endswith("/rates"))
+
 
 if __name__ == "__main__":
     unittest.main()
