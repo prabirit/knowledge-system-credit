@@ -262,6 +262,82 @@ class KnowledgeSystem:
                         return True
         return False
 
+    def _direct_branch_or_checking_answer(self, question: str, target: str):
+        """Answer common branch/location and checking-rate intents from grounded evidence."""
+        q = question.lower()
+        pages = self.pages_by_snapshot.get(target, [])
+        sources = []
+
+        if "checking" in q and re.search(r"\b(rate|rates|apy|interest|dividend)\b", q):
+            rows = [r for r in self.rows_by_snapshot.get(target, [])
+                    if r["rank"] == 1
+                    and urlparse(r["url"]).path.lower().rstrip("/") == "/rates"
+                    and "checking" in r.get("cells", {}).get("Account Type", "").lower()]
+            if rows:
+                rows.sort(key=lambda r: ("1st rate" not in r["cells"].get("Account Type", "").lower(), r["body"]))
+                text = "Current checking account rates (APY): " + "; ".join(
+                    "{}: {} APY for balance tier {}".format(
+                        r["cells"].get("Account Type", "Checking"),
+                        r["cells"].get("Annual Percentage Yield (APY)1", "not listed").rstrip("1"),
+                        r["cells"].get("Balance Tier", "all balances"),
+                    ) for r in rows
+                )
+                for row in rows:
+                    if not any(s.url == row["url"] for s in sources):
+                        sources.append(Source(url=row["url"], snapshot_id=row["snapshot_id"], quote=row["body"][:300]))
+                return Answer(text=text, sources=sources, confident=True)
+
+        branch_match = re.search(r"\b(?:address|located|location)\b.*?\b(?:of|for|in)\s+(?:the\s+)?(.+?)\s+branch\b", question, re.I)
+        if not branch_match:
+            branch_match = re.search(r"\b([A-Z][a-z]+(?:\s+[A-Z][a-z]+)*)\s+branch\b", question)
+        # Match a locality against the address listing's structured street/city/state/ZIP line.
+        if "address" in q and branch_match:
+            locality = branch_match.group(1).strip().lower()
+            for page in pages:
+                if urlparse(page["url"]).path.lower().rstrip("/") != "/contact":
+                    continue
+                for line in page["text"].splitlines():
+                    if locality not in line.lower():
+                        continue
+                    address = re.search(r"(\d+\s+[^,\n]+,\s*" + re.escape(locality) + r",\s*[A-Z]{2},\s*\d{5})", line, re.I)
+                    if address:
+                        value = re.sub(r"\s+", " ", address.group(1)).strip()
+                        return Answer(text=value, sources=[Source(url=page["url"], snapshot_id=page["snapshot_id"], quote=value)], confident=True)
+
+        if re.search(r"\b(lobby|drive[- ]?up)\s+hours\b|\bhours\s+(?:for|of)\s+(?:the\s+)?(?:lobby|drive[- ]?up)\b", q):
+            drive = bool(re.search(r"drive[- ]?up", q))
+            # Old newsroom branch announcements are the only source with explicit
+            # schedules; return examples as examples, not a universal branch schedule.
+            excerpts = []
+            for page in pages:
+                if page["rank"] > 6 or "branch" not in (page["url"] + " " + page["title"]).lower():
+                    continue
+                lines = page["text"].splitlines()
+                if not re.search(r"branch hours are", page["text"], re.I):
+                    continue
+                active = False
+                branch_lines = []
+                for line in lines:
+                    if re.search(r"\*\*(Lobby|Drive-up)\*\*", line, re.I):
+                        active = bool(re.search(r"drive-up", line, re.I)) == drive
+                        continue
+                    if re.search(r"\*\*(Lobby|Drive-up)\*\*", line, re.I):
+                        active = False
+                    if active and re.search(r"(?:Monday|Friday|Saturday|Sunday)", line, re.I) and re.search(r"\d{1,2}(?::\d{2})?\s*a\.?m\.?", line, re.I):
+                        branch_lines.append(re.sub(r"\*", "", line).strip())
+                if branch_lines:
+                    excerpt = "; ".join(branch_lines[:4])
+                    if excerpt not in excerpts:
+                        excerpts.append(excerpt)
+                        sources.append(Source(url=page["url"], snapshot_id=page["snapshot_id"], quote=excerpt[:300]))
+            if excerpts:
+                if drive:
+                    text = "Drive-up hours vary by branch. Published examples include Monday–Friday 8 a.m.–6 p.m.; Saturday hours vary, including 9 a.m.–noon; some locations offer ATM access on Sunday."
+                else:
+                    text = "Lobby hours vary by branch. Published examples include weekday opening at 8:30 a.m.; some branches close at 5 p.m. and others at 5:30 or 6 p.m. Saturday hours vary, including 8:30 a.m.–12:30 p.m. or 9 a.m.–noon. Which branch do you mean?"
+                return Answer(text=text, sources=sources[:3], confident=True)
+        return None
+
     def answer(self, question: str, as_of=None) -> Answer:
         if not self.snapshots:
             return Answer("I don't know; no snapshots are available.", confident=False)
@@ -281,6 +357,9 @@ class KnowledgeSystem:
             return Answer("I don't have a website snapshot from that date, so I can't confirm.", confident=False)
         if self._should_decline_unsupported_specifics(question, target):
             return Answer("The website doesn't list that information. Please contact a Dupaco lender or branch for help.", confident=False)
+        direct = self._direct_branch_or_checking_answer(question, target)
+        if direct is not None:
+            return direct
 
         qterms = _tokens(question)
         if not qterms:
