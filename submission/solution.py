@@ -243,6 +243,41 @@ class KnowledgeSystem:
                 scored.append((score, item))
         if not scored:
             return Answer("I couldn't find that information in the available website pages. Please contact Dupaco.", confident=False)
+        # For vehicle-loan questions, enforce the requested term and model-year range
+        # before lexical ranking. This prevents a calculator's stale but more keyword-rich
+        # table from beating the authoritative loan-rate table.
+        qlower = question.lower()
+        if re.search(r"\b(auto|vehicle|car)\b", qlower):
+            term_match = re.search(r"\b(\d{2,3})\s*[- ]?\s*months?\b", qlower)
+            year_match = re.search(r"\b(20\d{2})\b", qlower)
+            if term_match and year_match:
+                requested_term = int(term_match.group(1))
+                requested_year = int(year_match.group(1))
+                qualified = []
+                for score, item in scored:
+                    if item["kind"] != "table":
+                        continue
+                    body = item["body"]
+                    row_term = re.search(r"\b(\d{2,3})\s*months?\b", body, re.I)
+                    if not row_term or int(row_term.group(1)) != requested_term:
+                        continue
+                    ranges = RANGE_RE.findall(body)
+                    in_year_range = False
+                    for start_s, end_s in ranges:
+                        start, end = int(start_s), int(end_s)
+                        if end < 100:
+                            end = (start // 100) * 100 + end
+                        if start <= requested_year <= end:
+                            in_year_range = True
+                            break
+                    # A row with no explicit range isn't evidence for a specific model year.
+                    if in_year_range:
+                        qualified.append((score, item))
+                authoritative = [(score, item) for score, item in qualified if item["rank"] <= 2]
+                if authoritative:
+                    scored = authoritative
+                elif qualified:
+                    scored = qualified
         scored.sort(key=lambda pair: (pair[0], -pair[1]["rank"], pair[1]["url"]), reverse=True)
         best_score, best = scored[0]
         if best_score < 2.0:
