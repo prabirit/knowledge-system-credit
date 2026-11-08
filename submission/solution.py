@@ -1,0 +1,324 @@
+"""Snapshot-grounded knowledge system for the Knowledge Hackathon.
+
+Dependency-free first implementation. It preserves snapshot history, extracts markdown
+rows as qualified evidence, and uses deterministic lexical retrieval as a fallback.
+"""
+from __future__ import annotations
+
+import re
+import sys
+from pathlib import Path
+from urllib.parse import urlparse
+
+# The harness exposes these dataclasses while loading submissions.
+sys.path.insert(0, str(next(
+    d / "harness" for d in Path(__file__).resolve().parents
+    if (d / "harness" / "contract.py").exists()
+)))
+from contract import Answer, Conflict, Snapshot, Source  # noqa: E402
+
+WORD_RE = re.compile(r"[a-z0-9]+(?:[.$%][a-z0-9]+)*", re.I)
+RANGE_RE = re.compile(r"\b(\d{4})\s*[-–]\s*(\d{2,4})\b")
+TABLE_SEP_RE = re.compile(r"^\|?\s*:?-{2,}.*\|.*$\s*$")
+DATE_RE = re.compile(r"\b(\d{1,2})/(\d{1,2})/(\d{4})\b")
+STOP = set("""
+    a an the is are was were be been being do does did have has had what what's
+    which who where when why how can could would should tell me please i we you
+    your our dupaco of for to in on at by from with as and or it this that these
+    those about current currently now today rate rates interest tell give find
+    know offer offers account accounts loan loans savings their they them
+""".split())
+ALIASES = {
+    "cd": "certificate", "certificates": "certificate", "certificate": "certificate",
+    "apy": "apy", "apr": "apr", "auto": "auto vehicle", "car": "auto vehicle",
+    "vehicle": "auto vehicle", "lobby": "branch lobby", "driveup": "drive up",
+    "drive-up": "drive up", "checking": "checking account", "branch": "branch",
+    "mortgage": "home loan", "jumbo": "jumbo", "hours": "hours",
+}
+
+
+def _tokens(text: str) -> set[str]:
+    lowered = text.lower()
+    out = set(WORD_RE.findall(lowered))
+    # Expand compact year ranges such as 2024-27 so a 2025 question matches.
+    for start_s, end_s in RANGE_RE.findall(lowered):
+        start, end = int(start_s), int(end_s)
+        if end < 100:
+            end = (start // 100) * 100 + end
+        if end >= start and end - start <= 20:
+            out.update(str(year) for year in range(start, end + 1))
+    for token in list(out):
+        if token in ALIASES:
+            out.update(ALIASES[token].split())
+    return out - STOP
+
+
+def _normal_url(url: str) -> str:
+    p = urlparse(url)
+    return (p.netloc.lower().removeprefix("www.") + p.path.rstrip("/").lower())
+
+
+def _page_rank(url: str, title: str, text: str) -> int:
+    path = urlparse(url).path.lower().rstrip("/")
+    lower_title = title.lower()
+    if "offer has expired" in lower_title or "offer has expired" in text[:500].lower():
+        return 99
+    if path in ("/rates", "/business-rates"):
+        return 1
+    if "/calculators" in path or "calculator" in path:
+        return 4
+    if path.startswith(("/learn/", "/business/resources/")):
+        return 5
+    if path.startswith("/newsroom/") or re.match(r"^/20\d{2}/", path):
+        return 6
+    if path.startswith("/hubfs/"):
+        return 7
+    if path.endswith("-lp") or path == "/switch-and-earn" or "offer" in path:
+        return 3
+    if path.startswith(("/personal/", "/business/", "/about/", "/contact")):
+        return 2
+    return 5
+
+
+def _parse_date(text: str):
+    m = DATE_RE.search(text or "")
+    if not m:
+        return None
+    month, day, year = map(int, m.groups())
+    try:
+        from datetime import date
+        return date(year, month, day).isoformat()
+    except ValueError:
+        return None
+
+
+def _table_rows(markdown: str):
+    """Yield (heading, row text, header/value mapping) from markdown tables."""
+    lines = markdown.splitlines()
+    heading = ""
+    i = 0
+    while i < len(lines):
+        line = lines[i].strip()
+        if line.startswith("#"):
+            heading = re.sub(r"^#+\s*", "", line).strip()
+        if line.startswith("|") and i + 1 < len(lines) and TABLE_SEP_RE.match(lines[i + 1].strip()):
+            headers = [c.strip() for c in line.strip("|").split("|")]
+            i += 2
+            while i < len(lines) and lines[i].strip().startswith("|"):
+                raw = lines[i].strip()
+                cells = [c.strip() for c in raw.strip("|").split("|")]
+                if len(cells) == len(headers):
+                    yield heading, raw, dict(zip(headers, cells))
+                i += 1
+            continue
+        i += 1
+
+
+def _chunks(markdown: str):
+    """Split prose into compact heading-aware paragraphs."""
+    heading = ""
+    for block in re.split(r"\n\s*\n", markdown):
+        block = block.strip()
+        if not block:
+            continue
+        if block.startswith("#"):
+            heading = re.sub(r"^#+\s*", "", block).strip()
+            continue
+        # Avoid giant pages/captured navigational sections as a single retrieval unit.
+        if len(block) > 1600:
+            for piece in re.split(r"(?<=[.!?])\s+", block):
+                if len(piece.strip()) > 35:
+                    yield heading, piece.strip()[:800]
+        elif len(block) > 35:
+            yield heading, block[:1200]
+
+
+class KnowledgeSystem:
+    def __init__(self):
+        self.snapshots = []
+        self.pages_by_snapshot = {}
+        self.page_versions = {}
+        self.rows_by_snapshot = {}
+        self.passages_by_snapshot = {}
+        self._conflicts = []
+
+    def ingest(self, snapshot: Snapshot) -> None:
+        """Index a complete dated snapshot. The scorer calls these oldest first."""
+        if self.snapshots and snapshot.taken_on < self.snapshots[-1][1]:
+            raise ValueError("Snapshots must be ingested oldest first")
+        self.snapshots.append((snapshot.snapshot_id, snapshot.taken_on))
+        pages, rows, passages = [], [], []
+        for page in snapshot.pages:
+            record = {
+                "url": page.url, "title": page.title, "text": page.markdown,
+                "snapshot_id": snapshot.snapshot_id, "date": snapshot.taken_on,
+                "rank": _page_rank(page.url, page.title, page.markdown),
+            }
+            pages.append(record)
+            self.page_versions.setdefault(_normal_url(page.url), []).append(record)
+            page_terms = _tokens(page.title + " " + page.url)
+            for heading, row_text, cells in _table_rows(page.markdown):
+                row = dict(record)
+                row.update(kind="table", heading=heading, body=row_text, cells=cells,
+                           terms=_tokens(page.title + " " + page.url + " " + heading + " " + row_text))
+                row["effective_date"] = _parse_date(" ".join((heading, row_text, page.markdown[max(0, page.markdown.find(row_text)-180):page.markdown.find(row_text)+len(row_text)+500])))
+                rows.append(row)
+            for heading, body in _chunks(page.markdown):
+                passages.append({**record, "kind": "prose", "heading": heading,
+                                 "body": body, "terms": _tokens(page.title + " " + page.url + " " + heading + " " + body),
+                                 "page_terms": page_terms})
+        self.pages_by_snapshot[snapshot.taken_on] = pages
+        self.rows_by_snapshot[snapshot.taken_on] = rows
+        self.passages_by_snapshot[snapshot.taken_on] = passages
+        self._build_conflicts()
+
+    def _selected_date(self, as_of):
+        if not self.snapshots:
+            return None
+        if not as_of:
+            return self.snapshots[-1][1]
+        eligible = [d for _, d in self.snapshots if d <= as_of]
+        return max(eligible) if eligible else None
+
+    def _rank_candidate(self, item, query_terms, question, doc_frequency, n_docs):
+        overlap = query_terms & item["terms"]
+        if not overlap:
+            return 0.0
+        # BM25-inspired IDF weights rare, discriminative terms (e.g. routing, Hy-Vee)
+        # more heavily than common words (e.g. account, rate).
+        score = sum(1.0 + __import__("math").log((n_docs + 1) / (doc_frequency.get(t, 0) + 1)) for t in overlap)
+        coverage = len(overlap) / max(1, len(query_terms))
+        score += coverage * 2.0
+        if item["kind"] == "table":
+            score += 1.5
+        score += max(0, 7 - item["rank"]) * 0.25
+        q = question.lower()
+        path = urlparse(item["url"]).path.lower()
+        if re.search(r"\b(auto|vehicle|car)\b", q) and ("auto" in path or "motorcycle" in path):
+            score += 3.0
+        if re.search(r"\b(mortgage|home loan)\b", q) and ("home-loan" in path or path.endswith("/rates")):
+            score += 3.0
+        if re.search(r"\b(certificate|cd)\b", q) and (path.endswith("/rates") or "savings-account" in path):
+            score += 2.0
+        if "business" in q and "business" in path:
+            score += 2.0
+        # Prefer exact question qualifiers in a table row: term, year, balance tier.
+        if item["kind"] == "table":
+            for pattern in (r"\b\d+\s*[- ]?\s*months?\b", r"\b\d{4}\b", r"\$\s?[\d,]+"):
+                for match in re.findall(pattern, q):
+                    if _tokens(match) & item["terms"]:
+                        score += 2.5
+        return score
+
+    def answer(self, question: str, as_of=None) -> Answer:
+        if not self.snapshots:
+            return Answer("I don't know; no snapshots are available.", confident=False)
+        from datetime import date
+        requested = as_of
+        if not requested:
+            requested = _parse_date(question)
+            if not requested:
+                # Month-year phrases resolve to that month's end; month without year uses latest year.
+                m = re.search(r"\b(?:as of|in)\s+(January|February|March|April|May|June|July|August|September|October|November|December)\s+(20\d{2})\b", question, re.I)
+                if m:
+                    from calendar import monthrange
+                    month = list(__import__("calendar").month_name).index(m.group(1).title())
+                    requested = date(int(m.group(2)), month, monthrange(int(m.group(2)), month)[1]).isoformat()
+        target = self._selected_date(requested)
+        if target is None:
+            return Answer("I don't have a website snapshot from that date, so I can't confirm.", confident=False)
+
+        qterms = _tokens(question)
+        if not qterms:
+            return Answer("I don't know; I couldn't identify the requested information.", confident=False)
+        candidates = self.rows_by_snapshot.get(target, []) + self.passages_by_snapshot.get(target, [])
+        doc_frequency = {}
+        for item in candidates:
+            for term in item["terms"]:
+                doc_frequency[term] = doc_frequency.get(term, 0) + 1
+        scored = []
+        for item in candidates:
+            score = self._rank_candidate(item, qterms, question, doc_frequency, max(1, len(candidates)))
+            if score > 0:
+                scored.append((score, item))
+        if not scored:
+            return Answer("I couldn't find that information in the available website pages. Please contact Dupaco.", confident=False)
+        scored.sort(key=lambda pair: (pair[0], -pair[1]["rank"], pair[1]["url"]), reverse=True)
+        best_score, best = scored[0]
+        if best_score < 2.0:
+            return Answer("I couldn't find that information in the available website pages. Please contact Dupaco.", confident=False)
+        # Broad list queries can span several official product pages; keep only strong,
+        # same-domain matches to avoid mixing unrelated numbers into the answer.
+        wants_list = bool(re.search(r"\b(all|list|what .* offer|what .* rates|rates for|interest rates|what are .* cards)\b", question.lower()))
+        selected = [best]
+        if wants_list:
+            seen = {best["body"]}
+            for score, item in scored[1:]:
+                if score < best_score * 0.58 or item["kind"] != best["kind"]:
+                    continue
+                if item["body"] in seen:
+                    continue
+                if best["kind"] == "table" and item["rank"] > 2:
+                    continue
+                selected.append(item)
+                seen.add(item["body"])
+                if len(selected) >= 12:
+                    break
+        texts = []
+        for item in selected:
+            body = re.sub(r"^\|\s*|\s*\|$", "", item["body"])
+            texts.append(body)
+        text = "; ".join(texts)[:1800]
+        sources = []
+        for item in selected:
+            if not any(s.url == item["url"] for s in sources):
+                sources.append(Source(url=item["url"], snapshot_id=item["snapshot_id"], quote=item["body"][:300]))
+        return Answer(text=text, sources=sources, confident=best_score >= 2.0)
+
+    def _build_conflicts(self):
+        """Conservative row-level conflicts for identical normalized row headings.
+
+        This intentionally avoids declaring table tiers to conflict unless the row's
+        product/qualifier text is identical and the value portion changed.
+        """
+        by_key = {}
+        for snap_date in self.rows_by_snapshot:
+            for row in self.rows_by_snapshot[snap_date]:
+                if row["rank"] > 2:
+                    continue
+                key = (_normal_url(row["url"]), row["heading"].lower(),
+                       re.sub(r"\d[\d,.%]*", "#", row["body"].lower()))
+                by_key.setdefault(key, []).append(row)
+        # Cross-page contradictions are detected by exact normalized product row,
+        # after removing numbers; use only distinct URLs and values.
+        value_groups = {}
+        for (_, heading, normalized), records in by_key.items():
+            vals = sorted(set(r["body"] for r in records))
+            urls = sorted(set(r["url"] for r in records))
+            if len(vals) > 1 and len(urls) > 1:
+                key = (heading, normalized)
+                value_groups[key] = records
+        conflicts = []
+        for (heading, _), records in value_groups.items():
+            unique = {}
+            for r in records:
+                unique.setdefault(r["body"], r)
+            vals = list(unique)
+            if len(vals) < 2:
+                continue
+            winner = max(unique.values(), key=lambda r: (r["rank"], r["date"], r.get("effective_date") or ""))
+            conflicts.append(Conflict(
+                topic=heading or "Website fact",
+                values=vals,
+                sources=[Source(url=r["url"], snapshot_id=r["snapshot_id"], quote=r["body"][:250]) for r in unique.values()],
+                resolution=winner["body"],
+                reason="Selected the more authoritative, newer official page/version.",
+            ))
+        self._conflicts = conflicts
+
+    def conflicts(self):
+        return list(self._conflicts)
+
+
+def build():
+    return KnowledgeSystem()
