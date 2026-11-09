@@ -4,7 +4,7 @@ A deterministic Python system that reads five dated snapshots of a credit-union 
 answers member questions with the **current, correctly-tiered value**, a **source**, and an honest
 **"the website doesn't list that"** when the site doesn't say.
 
-This document describes the code in `submission/solution.py` as it exists. Section 9 records how
+This document describes the code in `submission/` as it exists: a thin entry point (`solution.py`) over a `knowledge/` package. Section 9 records how
 it differs from the original plan and why.
 
 ---
@@ -37,6 +37,31 @@ it differs from the original plan and why.
 | `04_2026-08-27_rebaseline` | 27 Aug 2026 | 683 |
 | `05_2026-09-28_latest` | 28 Sep 2026 ("current") | 705 |
 
+### Code layout
+
+```
+submission/
+├── solution.py              entry point: build(), ingest(), answer(), conflicts()  (pipeline only)
+└── knowledge/
+    ├── text.py              tokenising, aliases, date parsing
+    ├── authority.py         page authority rank, URL normalising
+    ├── parsing.py           Markdown tables and prose passages
+    ├── store.py             in-memory per-snapshot store, snapshot selection
+    ├── dates.py             which date a question is about
+    ├── retrieval.py         keyword fallback with term / model-year filters
+    ├── conflicts.py         conflict detection
+    └── handlers/
+        ├── decline.py       refuse unpublished rates / branches
+        ├── rates.py         personal-loan APR, deposit APY by tier
+        ├── branches.py      checking, branch addresses, lobby / drive-up hours
+        ├── mortgage.py      purchase mortgage tiers
+        ├── products.py      credit cards, certificates, mobile wallets
+        └── facts.py         eligibility, Home$tart, VTO, Forbes, closures, tier membership
+```
+
+A handler is a function `(question, target, store) -> Answer | None`. Handlers are tried in order
+(`handlers/__init__.py`) and the first one that returns an answer wins.
+
 ---
 
 ## 2. Design decisions
@@ -49,7 +74,7 @@ it differs from the original plan and why.
 | Database | None; in memory | ~3,300 page versions, rebuilt by `ingest()` on every scorer run |
 | Libraries | Python standard library only | Clean 3.11 install, offline |
 
-### Source authority (`_page_rank`)
+### Source authority (`knowledge/authority.py`)
 
 | Rank | Page type | Detected by |
 |---|---|---|
@@ -80,9 +105,9 @@ flowchart TB
 
     subgraph ING["Ingest (per snapshot)"]
         direction TB
-        PR["Page authority rank<br/>_page_rank"]
-        TR["Table-row parser<br/>_table_rows"]
-        CH["Prose chunker<br/>_chunks"]
+        PR["Page authority rank<br/>authority.page_rank"]
+        TR["Table-row parser<br/>parsing.table_rows"]
+        CH["Prose chunker<br/>parsing.prose_chunks"]
         PR --> TR
         PR --> CH
     end
@@ -136,9 +161,9 @@ flowchart TB
 For each snapshot, every page becomes a record with its URL, title, text, snapshot id/date and
 authority rank. From each page:
 
-- **Table rows** (`_table_rows`): each Markdown table row keeps its header→cell mapping, the nearest
+- **Table rows** (`parsing.table_rows`): each Markdown table row keeps its header→cell mapping, the nearest
   heading, and any "effective as of MM/DD/YYYY" date found near the table.
-- **Prose passages** (`_chunks`): paragraphs split at headings, each with a keyword set and any
+- **Prose passages** (`parsing.prose_chunks`): paragraphs split at headings, each with a keyword set and any
   "offer ended YYYY-MM-DD" expiry date.
 
 Everything is held per snapshot (`rows_by_snapshot`, `passages_by_snapshot`, `pages_by_snapshot`),
@@ -169,11 +194,11 @@ Each handler reads its value from the page in the selected snapshot; none return
 
 | Handler | Answers | Reads from |
 |---|---|---|
-| `_direct_rate_lookup_answer` | Personal-loan APR by term; named deposit product APY/dividend, choosing the tier that contains any $ amount in the question | `/personal/loans/personal-loans`, `/rates` |
-| `_direct_branch_or_checking_answer` | Checking rates; branch/ATM street address by city or street; lobby/drive-up hours (lists every published schedule, asks which branch) | `/rates`, `/contact`, branch newsroom posts |
-| `_direct_mortgage_rate_answer` | Purchase mortgage rates; smallest loan-amount tier containing the requested amount; headline tier for broad questions | `/rates` |
-| `_direct_product_list_answer` | Credit-card APRs (all or a named card); certificate rates (all, or a named term / jumbo); certificate-rates link; mobile wallets | card pages, `/rates`, mobile-payments page |
-| `_direct_general_fact_answer` | Home$tart amount; membership eligibility (bullets from the join page); phone; branch locator URL; branch closure date and alternatives; contact updates; student loans; Volunteer Time Off by year; Forbes recognition (article matching the question); join link; "do any tiers pay X%?" (checks every tier) | the relevant page in the snapshot |
+| `handlers/rates.py` | Personal-loan APR by term; named deposit product APY/dividend, choosing the tier that contains any $ amount in the question | `/personal/loans/personal-loans`, `/rates` |
+| `handlers/branches.py` | Checking rates; branch/ATM street address by city or street; lobby/drive-up hours (lists every published schedule, asks which branch) | `/rates`, `/contact`, branch newsroom posts |
+| `handlers/mortgage.py` | Purchase mortgage rates; smallest loan-amount tier containing the requested amount; headline tier for broad questions | `/rates` |
+| `handlers/products.py` | Credit-card APRs (all or a named card); certificate rates (all, or a named term / jumbo); certificate-rates link; mobile wallets | card pages, `/rates`, mobile-payments page |
+| `handlers/facts.py` | Home$tart amount; membership eligibility (bullets from the join page); phone; branch locator URL; branch closure date and alternatives; contact updates; student loans; Volunteer Time Off by year; Forbes recognition (article matching the question); join link; "do any tiers pay X%?" (checks every tier) | the relevant page in the snapshot |
 
 ### Keyword fallback
 
@@ -222,6 +247,8 @@ uv run --python 3.11 python -m unittest submission.test_regressions -v
 python3 harness/run_eval.py --submission submission --eval eval/public_eval.jsonl
 python3 harness/run_eval.py --submission submission --eval dev/holdout_eval.jsonl
 python3 dev/build_eval80.py
+python3 dev/golden_snapshot.py record /tmp/before.json   # before a refactor
+python3 dev/golden_snapshot.py compare /tmp/before.json  # after: must print IDENTICAL
 python3 harness/run_eval.py --submission submission --eval dev/eval80.jsonl --conflicts-gold dev/conflicts_gold80.json
 ```
 
@@ -230,8 +257,9 @@ python3 harness/run_eval.py --submission submission --eval dev/eval80.jsonl --co
 | `submission/test_regressions.py` | as-of, term decline, conflict history, certificate list completeness, and reworded questions that must use page values |
 | `eval/public_eval.jsonl` | the 40 official practice questions |
 | `dev/holdout_eval.jsonl` | 16 independently worded questions |
-| `dev/eval80.jsonl` | 124 questions whose answers `dev/build_eval80.py` parses from raw snapshots without importing `solution.py` |
+| `dev/eval80.jsonl` | 124 questions whose answers `dev/build_eval80.py` parses from raw snapshots without importing the submission |
 | `harness/selftest` | bundled fixture, including its conflict gold |
+| `dev/golden_snapshot.py` | records every answer and conflict (289 questions across all sets plus edge cases and as-of probes) so a refactor can be proven byte-identical |
 
 The dev sets were used to find and fix bugs, so their scores are regression checks, not
 estimates of hidden-set performance.
@@ -244,7 +272,7 @@ The original plan proposed a richer structure. What was built is simpler where t
 
 | Planned | Built | Reason |
 |---|---|---|
-| Modules: `classify.py`, `extract.py`, `query.py`, `store.py`, `answer.py`, `search.py` | One file, `submission/solution.py` | Simplest drop-in for the scorer; candidate for refactoring (see `NOTES.md`) |
+| Modules: `classify.py`, `extract.py`, `query.py`, `store.py`, `answer.py`, `search.py` | `knowledge/` package: `text`, `authority`, `parsing`, `store`, `dates`, `retrieval`, `conflicts`, and one handler module per fact type, behind a 63-line `solution.py` | Grouped by what changes together; the first version was a single 1,170-line file and was split without changing any output |
 | `aliases.json` | `ALIASES` dict in code | A handful of synonyms didn't justify a config file |
 | `rank-bm25` library | Hand-written IDF-weighted keyword scorer | Keeps the submission stdlib-only |
 | Unified `facts{}` store with `valid_from`/`valid_to` history, used for answers and conflicts | Answers read per-snapshot rows via handlers; a fact store is built only for conflicts | Per-snapshot indexes made `as_of` trivial; targeted handlers gave more precise tier selection |
