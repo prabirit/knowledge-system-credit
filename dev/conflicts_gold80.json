@@ -1,0 +1,149 @@
+[
+ {
+  "id": "g-auto-new-60",
+  "topic_keywords": [
+   "60-month"
+  ],
+  "values": [
+   "5.34%",
+   "5.39%"
+  ],
+  "correct_value": "5.39%"
+ },
+ {
+  "id": "g-auto-new-72",
+  "topic_keywords": [
+   "72-month"
+  ],
+  "values": [
+   "5.44%",
+   "5.49%"
+  ],
+  "correct_value": "5.49%"
+ },
+ {
+  "id": "g-auto-new-84",
+  "topic_keywords": [
+   "84-month"
+  ],
+  "values": [
+   "5.54%",
+   "5.59%"
+  ],
+  "correct_value": "5.59%"
+ },
+ {
+  "id": "g-auto-mid-60",
+  "topic_keywords": [
+   "60-month"
+  ],
+  "values": [
+   "5.59%",
+   "5.64%"
+  ],
+  "correct_value": "5.64%"
+ },
+ {
+  "id": "g-auto-mid-72",
+  "topic_keywords": [
+   "72-month"
+  ],
+  "values": [
+   "5.74%",
+   "5.79%"
+  ],
+  "correct_value": "5.79%"
+ },
+ {
+  "id": "g-auto-mid-84",
+  "topic_keywords": [
+   "84-month"
+  ],
+  "values": [
+   "5.99%",
+   "6.04%"
+  ],
+  "correct_value": "6.04%"
+ },
+ {
+  "id": "g-auto-old-60",
+  "topic_keywords": [
+   "60-month"
+  ],
+  "values": [
+   "6.29%",
+   "6.34%"
+  ],
+  "correct_value": "6.34%"
+ },
+ {
+  "id": "g-auto-old-72",
+  "topic_keywords": [
+   "72-month"
+  ],
+  "values": [
+   "6.44%",
+   "6.49%"
+  ],
+  "correct_value": "6.49%"
+ },
+ {
+  "id": "g-mort-100,000",
+  "topic_keywords": [
+   "30-year",
+   "100000"
+  ],
+  "values": [
+   "5.750%",
+   "7.13%"
+  ],
+  "correct_value": "7.13%"
+ },
+ {
+  "id": "g-mort-200,000",
+  "topic_keywords": [
+   "30-year",
+   "200000"
+  ],
+  "values": [
+   "5.875%",
+   "7.25%"
+  ],
+  "correct_value": "7.25%"
+ },
+ {
+  "id": "g-mort-300,000",
+  "topic_keywords": [
+   "30-year",
+   "300000"
+  ],
+  "values": [
+   "6.000%",
+   "7.25%"
+  ],
+  "correct_value": "7.25%"
+ },
+ {
+  "id": "g-mort-832,750",
+  "topic_keywords": [
+   "30-year",
+   "832750"
+  ],
+  "values": [
+   "6.000%",
+   "7.25%"
+  ],
+  "correct_value": "7.25%"
+ },
+ {
+  "id": "g-mort-15",
+  "topic_keywords": [
+   "15-year"
+  ],
+  "values": [
+   "5.500%",
+   "6.75%"
+  ],
+  "correct_value": "6.75%"
+ }
+]
