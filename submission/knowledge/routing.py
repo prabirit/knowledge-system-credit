@@ -12,7 +12,6 @@ INTENTS = {
     # General facts / membership / service
     "home_start": (r"hometart", r"home\$tart"),
     "membership_subject": (r"\b(eligib\w*|who can join|can i join|become (?:a |an )?(?:dupaco )?member|join dupaco)\b",),
-    "membership_question": (r"\b(eligible|join|membership|who)\b",),
     "contact_phone_words": (r"\b(phone|telephone|call)\b",),
     "dupaco_reference": (r"\b(dupaco|you|your|us)\b",),
     "phone_specific_exclusion": (r"\b(lost|stolen|card|loan|mortgage|hsa|insurance|business|update|change|edit|ext|extension)\b",),
@@ -21,7 +20,6 @@ INTENTS = {
     "named_branch_event": (r"([A-Z][\w-]+(?:\s[A-Z][\w-]+)*)\s+(?:branch|location)\b",),
     "closure_event": (r"\b(close|closes|closed|closing|closure|still|operating|open|members|go|after|instead)\b",),
     "branch_event_alternatives": (r"\b(members|go|where|instead|full-service)\b",),
-    "event_branch_hours": (r"\b(hours?|lobby|drive[- ]?up)\b",),
     "contact_update_action": (r"\b(update|change|edit)\b",),
     "contact_fields": (r"\b(contact information|phone number|email address|address)\b",),
     "student_context": (r"\b(student|college|university|school|tuition)\b",),
@@ -46,7 +44,6 @@ INTENTS = {
     "location_time": (r"\b\d{1,2}(?::\d{2})?\s*(?:a\.?m\.?|p\.?m\.?)\b",),
 
     # Rates / product types
-    "rate_words": (r"\b(rate|rates|apy|apr|interest|dividend|earn|pay|pays|yield)\b",),
     "checking_subject": (r"checking",),
     "checking_rate_words": (r"\b(rate|rates|apy|interest|dividend)\b",),
     "address_words": (r"\b(address|where|located|location|street)\b",),
@@ -69,7 +66,6 @@ INTENTS = {
     "certificate_link_words": (r"\b(link|url|where can i|what link)\b",),
     "wallet_subject": (r"mobile wallet",),
     "wallet_card_subject": (r"wallet.*card|card.*wallet",),
-    "auto_vehicle_subject": (r"\b(auto|vehicle|car)\b",),
     "business_context": (r"business",),
     "dividend_attribute": (r"dividend",),
     "jumbo_qualifier": (r"jumbo",),

@@ -22,7 +22,6 @@ class RoutingVocabularyTests(unittest.TestCase):
         probes = {
             "home_start": "what is Home$tart?",
             "membership_subject": "Can I join Dupaco if a family member belongs?",
-            "membership_question": "Who can join?",
             "contact_phone_words": "What phone number should I call?",
             "dupaco_reference": "How do I call Dupaco?",
             "locator_link_request": "What is the branch locator URL?",
@@ -54,8 +53,8 @@ class RoutingVocabularyTests(unittest.TestCase):
         self.assertTrue(has("vto", "volunteer TIME off"))
 
     def test_all_of_requires_every_intent(self):
-        self.assertTrue(all_of("who can join dupaco", "membership_subject", "membership_question"))
-        self.assertFalse(all_of("what is the weather", "membership_subject", "membership_question"))
+        self.assertTrue(all_of("who can join dupaco", "membership_subject", "dupaco_reference"))
+        self.assertFalse(all_of("what is the weather", "membership_subject", "dupaco_reference"))
 
     def test_exclusions_block_a_trigger(self):
         self.assertTrue(none_of("how do i join", "membership_link"))
@@ -66,6 +65,17 @@ class RoutingVocabularyTests(unittest.TestCase):
         # "lost debit card" mentions a card but not a wallet, so it must not reach the wallet handler.
         self.assertFalse(has("wallet_card_subject", "how much is a lost debit card replacement"))
         self.assertTrue(has("wallet_card_subject", "can i add my card to a wallet"))
+
+
+class RegistryHygieneTests(unittest.TestCase):
+    def test_every_registered_intent_is_used_by_a_handler(self):
+        """The registry is the single source of truth, so it must not carry dead entries."""
+        handlers_dir = Path(__file__).resolve().parent / "knowledge" / "handlers"
+        source = "\n".join(p.read_text(encoding="utf8") for p in handlers_dir.glob("*.py"))
+        # Exclusion names are used with none_of(); intent names with has()/all_of()/INTENTS[...].
+        for name in list(INTENTS) + list(EXCLUSIONS):
+            with self.subTest(name=name):
+                self.assertIn('"%s"' % name, source, "%s is registered but never used" % name)
 
 
 class HandlerOrderTests(unittest.TestCase):
