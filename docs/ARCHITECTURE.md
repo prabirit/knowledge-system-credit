@@ -48,6 +48,7 @@ submission/
     ├── parsing.py           Markdown tables and prose passages
     ├── store.py             in-memory per-snapshot store, snapshot selection
     ├── dates.py             which date a question is about
+    ├── routing.py           ALL handler trigger patterns and exclusions, in one reviewable table
     ├── retrieval.py         keyword fallback with term / model-year filters
     ├── conflicts.py         conflict detection
     └── handlers/
@@ -60,7 +61,9 @@ submission/
 ```
 
 A handler is a function `(question, target, store) -> Answer | None`. Handlers are tried in order
-(`handlers/__init__.py`) and the first one that returns an answer wins.
+(`handlers/__init__.py`) and the first one that returns an answer wins. What triggers a handler is
+defined in `routing.py` (`has`, `all_of`, `none_of`), not inside the handlers, so adding or auditing a
+trigger means editing one file. Handlers keep only evidence parsing (for example reading a table row).
 
 ---
 
@@ -243,7 +246,7 @@ flowchart LR
 ## 8. Verification
 
 ```bash
-uv run --python 3.11 python -m unittest submission.test_regressions -v
+uv run --python 3.11 python -m unittest discover -s submission -p "test_*.py" -v
 python3 harness/run_eval.py --submission submission --eval eval/public_eval.jsonl
 python3 harness/run_eval.py --submission submission --eval dev/holdout_eval.jsonl
 python3 dev/build_eval80.py
@@ -254,7 +257,9 @@ python3 harness/run_eval.py --submission submission --eval dev/eval80.jsonl --co
 
 | Check | What it guards |
 |---|---|
-| `submission/test_regressions.py` | as-of, term decline, conflict history, certificate list completeness, and reworded questions that must use page values |
+| `submission/test_snapshot_and_conflicts.py` | as-of snapshot choice, certificate-term decline, conflict history, full certificate list |
+| `submission/test_routed_facts.py` | reworded questions that must be answered from page evidence (VTO by year, tier membership, Forbes, eligibility) |
+| `submission/test_routing.py` | trigger vocabulary compiles and matches, exclusions block, handler order is stable |
 | `eval/public_eval.jsonl` | the 40 official practice questions |
 | `dev/holdout_eval.jsonl` | 16 independently worded questions |
 | `dev/eval80.jsonl` | 124 questions whose answers `dev/build_eval80.py` parses from raw snapshots without importing the submission |

@@ -5,12 +5,13 @@ import re
 from urllib.parse import urlparse
 
 from contract import Answer, Source  # noqa: E402
+from ..routing import all_of, has
 
 
 def answer_mortgage_rate(question: str, target: str, store):
     """Select purchase mortgage rate tiers from the official current rate table."""
     q = question.lower()
-    if not re.search(r"\b(mortgage|home loan)\b", q) or not re.search(r"\b(rate|rates|interest|apr)\b", q):
+    if not all_of(q, "mortgage_subject", "mortgage_rate_words"):
         return None
     # Older snapshots label this column "Term" instead of "Program", so use the first cell.
     first = lambda r: next(iter(r["cells"].values()), "") if r.get("cells") else ""
@@ -29,7 +30,7 @@ def answer_mortgage_rate(question: str, target: str, store):
         return None
     # Exact loan-amount tier when asked; otherwise broad mortgage questions lead
     # with the $100k tier, matching the evaluator's desired headline.
-    if "$" in q:
+    if has("loan_amount", q):
         amount = re.search(r"\$\s*([\d,]+)", q)
         requested_amount = int(amount.group(1).replace(",", "")) if amount else None
         selected = []
@@ -39,7 +40,7 @@ def answer_mortgage_rate(question: str, target: str, store):
             if requested_amount and limit and requested_amount <= limit:
                 selected.append((limit, row))
         rows_30 = [min(selected, key=lambda pair: pair[0])[1]] if selected else rows_30
-    elif "30-year" not in q and "30 year" not in q:
+    elif not has("thirty_year", q):
         rows_30 = [r for r in rows_30 if "$100,000" in program(r)] or rows_30
     else:
         # A general 30-year mortgage question should show the small and upper
@@ -50,10 +51,10 @@ def answer_mortgage_rate(question: str, target: str, store):
         tier = re.search(r"(\$[\d,]+ or less)", program(row), re.I)
         label = tier.group(1) if tier else "30-year fixed conventional"
         lines.append("30-year purchase, loans up to {}: {} rate / {} APR".format(label, rate(row), apr(row)))
-    if "30-year" not in q and "30 year" not in q and row_15:
+    if not has("thirty_year", q) and row_15:
         lines.append("15-year purchase: {} rate / {} APR".format(rate(row_15), apr(row_15)))
     source_url = "https://www.dupaco.com/personal/loans/home-loans#rates"
-    quote = " | ".join(r["body"] for r in rows_30 + ([row_15] if row_15 and "30-year" not in q and "30 year" not in q else []))
+    quote = " | ".join(r["body"] for r in rows_30 + ([row_15] if row_15 and not has("thirty_year", q) else []))
     effective = rows_30[0].get("effective_date") or rows_30[0]["date"]
     return Answer(text="Current purchase mortgage rates (effective {}): ".format(effective) + "; ".join(lines),
                   sources=[Source(url=source_url, snapshot_id=rows_30[0]["snapshot_id"], quote=quote[:300])],

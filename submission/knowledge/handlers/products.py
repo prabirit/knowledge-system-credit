@@ -5,15 +5,16 @@ import re
 from urllib.parse import urlparse
 
 from contract import Answer, Source  # noqa: E402
+from ..routing import all_of, has, none_of
 
 
 def answer_product_list(question: str, target: str, store):
     """Return complete, domain-specific lists from the official product pages."""
     q = question.lower()
     pages = store.pages_by_snapshot.get(target, [])
-    if (("credit card" in q or re.search(r"\b(platinum|rewards)\s+visa\b", q) or re.search(r"\bvisa\b.*\b(apr|interest|rate)\b", q))
-            and re.search(r"\b(rate|rates|apr|offer|offers|what|which|interest)\b", q)
-            and not re.search(r"intro|balance transfer|lost|stolen|point|redeem|cash advance|fee|terms|wallet|apple|google|samsung|debit|pay\b", q)):
+    if ((has("credit_card_entity", q) or has("platinum_visa_entity", q) or has("rewards_visa_entity", q) or has("visa_rate_entity", q))
+            and has("credit_card_rate_words", q)
+            and none_of(q, "credit_card_list")):
         cards = []
         sources = []
         for page in pages:
@@ -50,14 +51,14 @@ def answer_product_list(question: str, target: str, store):
             text = "Credit card standard APRs: " + "; ".join("{}: {}".format(name, apr) for name, apr in cards)
             return Answer(text=text, sources=sources, confident=True)
 
-    if "certificate" in q or re.search(r"\bcd\b", q) or (re.search(r"\bspecial\b", q) and re.search(r"\b\d+\s*[- ]?\s*months?\b", q)):
-        asks_for_link = bool(re.search(r"\b(link|url|where can i|what link)\b", q))
+    if has("certificate_subject", q) or (has("certificate_special_term", q) and has("month_term", q)):
+        asks_for_link = has("certificate_link_words", q)
         if asks_for_link:
             target_page = next((p for p in pages if urlparse(p["url"]).path.lower().rstrip("/") == "/personal/savings-account"), None)
             if target_page:
                 url = "https://www.dupaco.com/personal/savings-account#rates"
                 return Answer(text=url, sources=[Source(url=url, snapshot_id=target_page["snapshot_id"], quote="See today's certificate rates on the savings account rates section.")], confident=True)
-        if re.search(r"\b(rate|rates|apy|apr|certificate of accounts)\b", q):
+        if has("certificate_rate_words", q):
             rate_page = next((p for p in pages if urlparse(p["url"]).path.lower().rstrip("/") == "/rates"), None)
             if rate_page:
                 rows = []
@@ -84,7 +85,7 @@ def answer_product_list(question: str, target: str, store):
                     rows = [r for r in rows if re.match(r"^{}\s+months?\b".format(term), r[0].lower())]
                     if not rows:
                         return Answer("The website doesn't list a {}-month certificate rate. Please contact Dupaco.".format(term), confident=False)
-                    if "jumbo" in q:
+                    if has("jumbo_qualifier", q):
                         rows = [r for r in rows if "jumbo" in r[0].lower()] or rows
                     else:
                         rows = [r for r in rows if "jumbo" not in r[0].lower()] or rows
@@ -93,7 +94,7 @@ def answer_product_list(question: str, target: str, store):
                     text += "; ".join("{}: {} dividend rate, {} APY (minimum {})".format(n, r, a, m) for n, r, a, m in rows)
                     return Answer(text=text, sources=[Source(url=rate_page["url"], snapshot_id=rate_page["snapshot_id"], quote="Certificate rate tables.")], confident=True)
 
-    if "mobile wallet" in q or ("wallet" in q and "card" in q):
+    if has("wallet_subject", q) or all_of(q, "wallet_card_subject"):
         page = next((p for p in pages if urlparse(p["url"]).path.lower().rstrip("/") == "/online-and-mobile-banking/mobile-payments"), None)
         if page:
             supported = [name for name in ("Apple Pay", "Google Pay", "Samsung Pay") if name.lower() in page["text"].lower()]

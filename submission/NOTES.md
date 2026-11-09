@@ -27,7 +27,7 @@ The store and search index are rebuilt by `ingest()` for each scorer run. No ext
 The deterministic design trades flexibility for predictability. Its main limitations are:
 
 - **Website layout changes:** extraction depends on recognizable URLs, page types, Markdown tables, headings and phrasing. A redesigned rates page, renamed columns, or moved branch listing could make facts disappear or be misclassified. When the site changes, review the page classifier, table parser and source-ranking rules first.
-- **Hand-written routing:** many intents (mortgage tiers, auto-loan model years, branch hours, membership, product lists and several prose facts) have targeted handlers keyed to specific page paths and phrasings. Values come from the pages, but *which* page and *which* phrasings trigger a handler are hard-coded, so a renamed page, a new product or an unanticipated wording can bypass a handler and fall through to the weaker keyword fallback. Each fact type now has its own module under `submission/knowledge/handlers/`, which makes a new or changed rule easy to find and test, but the trigger phrasings themselves remain hand-written.
+- **Hand-written routing:** many intents (mortgage tiers, auto-loan model years, branch hours, membership, product lists and several prose facts) have targeted handlers keyed to specific page paths and phrasings. Values come from the pages, but *which* page and *which* phrasings trigger a handler are hard-coded, so a renamed page, a new product or an unanticipated wording can bypass a handler and fall through to the weaker keyword fallback. Each fact type has its own module under `submission/knowledge/handlers/`, and every trigger pattern now lives in one table, `submission/knowledge/routing.py`, so triggers can be audited and extended in one place. The phrasings are still hand-written regular expressions, so an unanticipated wording can still miss a handler; that remains the main limitation.
 - **Paraphrase coverage:** lexical retrieval and the alias list cover common wording, but unusual paraphrases with little word overlap may miss the correct passage. If hidden or production questions show that pattern, add a local or optional embedding/re-ranking step as a fallback, keeping deterministic fact selection for numeric answers.
 - **Prose extraction depth:** structured tables are handled more reliably than long narrative pages, PDFs and spreadsheets. Facts embedded in prose may need additional extractors, or an optional ingest-time LLM extractor with cached outputs and a rules-only fallback.
 - **Temporal gaps:** snapshots are point-in-time observations. A value that changed and reverted between crawls cannot be observed, and an `as_of` answer reflects the latest captured snapshot, not necessarily every real-world update. Dates outside the snapshot range need explicit handling and clear communication.
@@ -42,7 +42,7 @@ Future updates should be driven by evaluation failures: keep public and hold-out
 From the repository root:
 
 ```bash
-python3 -m unittest submission.test_regressions
+python3 -m unittest discover -s submission -p "test_*.py"
 python3 harness/run_eval.py --submission submission --snapshots harness/selftest/snapshots --eval harness/selftest/eval.jsonl --conflicts-gold harness/selftest/conflicts_gold.json
 python3 harness/run_eval.py --submission submission --eval eval/public_eval.jsonl
 python3 harness/run_eval.py --submission submission --eval dev/holdout_eval.jsonl

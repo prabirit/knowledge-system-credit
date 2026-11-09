@@ -5,6 +5,7 @@ import re
 from urllib.parse import urlparse
 
 from contract import Answer, Source  # noqa: E402
+from ..routing import all_of, has
 
 
 def answer_branch_or_checking(question: str, target: str, store):
@@ -13,7 +14,7 @@ def answer_branch_or_checking(question: str, target: str, store):
     pages = store.pages_by_snapshot.get(target, [])
     sources = []
 
-    if "checking" in q and re.search(r"\b(rate|rates|apy|interest|dividend)\b", q):
+    if has("checking_subject", q) and has("checking_rate_words", q):
         rows = [r for r in store.rows_by_snapshot.get(target, [])
                 if r["rank"] == 1
                 and urlparse(r["url"]).path.lower().rstrip("/") == "/rates"
@@ -34,8 +35,8 @@ def answer_branch_or_checking(question: str, target: str, store):
 
     # Branch / ATM street address: match a city or street name from the structured
     # location listing on the contact page against the question.
-    if re.search(r"\b(address|where|located|location|street)\b", q) and re.search(r"\b(branch|office|atm|located|address)\b", q):
-        wants_atm = "atm" in q
+    if all_of(q, "address_words", "branch_address_entity"):
+        wants_atm = has("atm_entity", q)
         for page in pages:
             if urlparse(page["url"]).path.lower().rstrip("/") != "/contact":
                 continue
@@ -57,8 +58,8 @@ def answer_branch_or_checking(question: str, target: str, store):
                 value = "; ".join(sorted({e["full"] for e in hits}))
                 return Answer(text=value, sources=[Source(url=page["url"], snapshot_id=page["snapshot_id"], quote=value[:250])], confident=True)
 
-    if re.search(r"\b(lobby|drive[- ]?up)\s+hours\b|\bhours\s+(?:for|of)\s+(?:the\s+)?(?:lobby|drive[- ]?up)\b", q):
-        drive = bool(re.search(r"drive[- ]?up", q))
+    if has("hours_words", q):
+        drive = has("drive_up", q)
         # Old newsroom branch announcements are the only source with explicit
         # schedules; return examples as examples, not a universal branch schedule.
         excerpts = []

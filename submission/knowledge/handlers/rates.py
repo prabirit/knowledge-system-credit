@@ -5,6 +5,7 @@ import re
 from urllib.parse import urlparse
 
 from contract import Answer, Source  # noqa: E402
+from ..routing import all_of, has
 
 
 def answer_rate_lookup(question: str, target: str, store):
@@ -12,12 +13,12 @@ def answer_rate_lookup(question: str, target: str, store):
     balance tier that contains any dollar amount in the question."""
     q = question.lower()
     qn = re.sub(r"[\u2019']", "", q).replace("-", " ")
-    rate_words = re.search(r"\b(rate|rates|apy|apr|interest|dividend|earn|pay|pays|yield)\b", q)
+    rate_words = has("named_rate_words", q)
     rows = store.rows_by_snapshot.get(target, [])
 
     # (a) personal loan APR by term
     term = re.search(r"\b(\d{1,3})\s*[- ]?\s*months?\b", q)
-    if "personal loan" in q and term and rate_words:
+    if has("personal_loan_subject", q) and term and rate_words:
         wanted = int(term.group(1))
         for row in rows:
             if urlparse(row["url"]).path.lower().rstrip("/") != "/personal/loans/personal-loans" or not row.get("cells"):
@@ -31,7 +32,7 @@ def answer_rate_lookup(question: str, target: str, store):
         return Answer("The website doesn't list a personal loan rate for a {}-month term. Please contact Dupaco.".format(wanted), confident=False)
 
     # (b) named deposit product on the consumer rate sheet
-    if not rate_words or "business" in q:
+    if not rate_words or has("business_context", q):
         return None
     products = {}
     for row in rows:
@@ -83,7 +84,7 @@ def answer_rate_lookup(question: str, target: str, store):
     dividend = cells.get("Dividend Rate", "")
     clean = lambda v: re.sub(r"(%)\d+$", r"\1", (v or "").strip())
     tier = cells.get("Balance Tier", "")
-    if "dividend" in q:
+    if has("dividend_attribute", q):
         text = "{} dividend rate for balances of {}: {}.".format(name, tier, clean(dividend))
     else:
         text = "{} APY for balances of {}: {}.".format(name, tier, clean(apy))

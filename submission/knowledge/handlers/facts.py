@@ -5,6 +5,7 @@ import re
 from urllib.parse import urlparse
 
 from contract import Answer, Source  # noqa: E402
+from ..routing import INTENTS, all_of, has, none_of
 
 
 def answer_general_fact(question: str, target: str, store):
@@ -18,7 +19,7 @@ def answer_general_fact(question: str, target: str, store):
     def source(page, quote):
         return [Source(url=page["url"], snapshot_id=page["snapshot_id"], quote=quote[:300])]
 
-    if "hometart" in q or "home$tart" in q:
+    if has("home_start", q):
         page = next((p for p in pages if "hometart" in p["text"].lower() and "up to $" in p["text"].lower()), None)
         if page:
             match = re.search(r"Home\$tart program.{0,240}?provides up to (\$[\d,]+) in assistance.{0,180}?down payment and closing costs", page["text"], re.I | re.S)
@@ -28,8 +29,7 @@ def answer_general_fact(question: str, target: str, store):
                 text = "The FHLB Home$tart program provides up to {} toward down payment and closing costs for eligible first-time homebuyers.".format(match.group(1))
                 return Answer(text=text, sources=source(page, text), confident=True)
 
-    if (re.search(r"\b(eligib\w*|who can join|can i join|become (?:a |an )?(?:dupaco )?member|join dupaco)\b", q)
-            and not re.search(r"\b(online|website|link|url|apply)\b", q)):
+    if all_of(q, "membership_subject") and none_of(q, "membership_link"):
         page = page_by_path("/about/join")
         if page:
             block = re.search(r"(?is)who can join(.*?)to join dupaco", page["text"])
@@ -42,8 +42,8 @@ def answer_general_fact(question: str, target: str, store):
                     text += " Dupaco operates in {}.".format(states.group(1))
                 return Answer(text=text, sources=source(page, text), confident=True)
 
-    if (re.search(r"\b(phone|telephone|call)\b", q) and re.search(r"\b(dupaco|you|your|us)\b", q)
-            and not re.search(r"\b(lost|stolen|card|loan|mortgage|hsa|insurance|business|update|change|edit|ext|extension)\b", q)):
+    if (all_of(q, "contact_phone_words", "dupaco_reference")
+                and not has("phone_specific_exclusion", q)):
         page = page_by_path("/contact")
         if page:
             phone = re.search(r"\*\*Phone:\*\*\s*\[?(\d{3}-\d{3}-\d{4})", page["text"]) or re.search(r"\[?(\d{3}-\d{3}-\d{4})\]?", page["text"])
@@ -51,16 +51,14 @@ def answer_general_fact(question: str, target: str, store):
                 text = "You can reach Dupaco at {}.".format(phone.group(1))
                 return Answer(text=text, sources=source(page, text), confident=True)
 
-    if re.search(r"\b(url|link|locator|website|web page|webpage)\b", q) and re.search(r"\b(branch|atm|locator|location)\b", q) \
-            and not re.search(r"\b(hours?|open|close|closing|address|members?)\b", q):
+    if all_of(q, "locator_link_request", "branch_locator_entity") and none_of(q, "locator_link"):
         page = page_by_path("/contact")
         if page:
             url = "https://www.dupaco.com/contact"
             return Answer(text=url, sources=source(page, "Find a branch, ATM or live video teller on the contact page."), confident=True)
 
-    named_branch = re.search(r"([A-Z][\w-]+(?:\s[A-Z][\w-]+)*)\s+(?:branch|location)\b", question)
-    if named_branch and re.search(r"\b(close|closes|closed|closing|closure|still|operating|open|members|go|after|instead)\b", q) \
-            and not re.search(r"\b(hours?|lobby|drive[- ]?up)\b", q):
+    named_branch = re.search(INTENTS["named_branch_event"][0], question)
+    if named_branch and has("closure_event", q) and none_of(q, "branch_hours"):
         name = named_branch.group(1)
         closing = []
         for p in pages:
@@ -70,7 +68,7 @@ def answer_general_fact(question: str, target: str, store):
         if closing:
             page, date_text = max(closing, key=lambda pm: ("closure" in pm[0]["url"], pm[0]["date"]))
             alt = re.search(r"([^.\u201d\"]*full-service branches at[^.]*\.)", page["text"])
-            if re.search(r"\b(members|go|where|instead|full-service)\b", q) and alt:
+            if has("branch_event_alternatives", q) and alt:
                 text = alt.group(1).strip()
             else:
                 from datetime import datetime
@@ -81,7 +79,7 @@ def answer_general_fact(question: str, target: str, store):
                 text = "The {} branch {} {}.".format(name, "closed on" if closed else "is scheduled to close on", date_text)
             return Answer(text=text, sources=source(page, text), confident=True)
 
-    if re.search(r"\b(update|change|edit)\b", q) and re.search(r"\b(contact information|phone number|email address|address)\b", q):
+    if all_of(q, "contact_update_action", "contact_fields"):
         page = page_by_path("/contact")
         if page:
             phone = re.search(r"\[?(\d{3}-\d{3}-\d{4})\]?", page["text"])
@@ -89,19 +87,19 @@ def answer_general_fact(question: str, target: str, store):
             text = "Update your information through Shine Online or Mobile Banking, or contact Dupaco at {} for help.".format(phone_text) if phone_text else "Update your information through Shine Online or Mobile Banking, or contact Dupaco for help."
             return Answer(text=text, sources=source(page, text), confident=True)
 
-    if re.search(r"\b(student|college|university|school|tuition)\b", q) and re.search(r"\b(loan|funding|repayment|flexible)\b", q):
+    if all_of(q, "student_context", "student_need"):
         page = page_by_path("/personal/loans/student-loans")
         if page:
             text = page["text"]
-            if re.search(r"\b(apr|rate|rates|interest)\b", q) and not re.search(r"\d\.\d+\s?%", text):
+            if has("student_rate_question", q) and not re.search(r"\d\.\d+\s?%", text):
                 return Answer("The website doesn't publish a student loan rate. Please contact Dupaco.", confident=False)
-            flexible = "flexible repayment terms" if re.search(r"flexible terms", text, re.I) else "flexible student-loan options"
-            no_fee = "no origination fees" if re.search(r"\$0 origination fees", text, re.I) else ""
+            flexible = "flexible repayment terms" if has("student_flexible_text", text) else "flexible student-loan options"
+            no_fee = "no origination fees" if has("student_no_fee_text", text) else ""
             terms = "new student loans or refinancing existing loans"
             answer = "Dupaco offers student loans (including new loans and refinancing) with flexible repayment terms, {} and no prepayment penalties.".format(no_fee or "competitive rates")
             return Answer(text=answer, sources=source(page, answer), confident=True)
 
-    if "volunteer time off" in q or re.search(r"\bvto\b", q):
+    if has("vto", q):
         # Each newsroom report states "**N Dupaco employees** used ... in YEAR ... Volunteer Time Off".
         reports = []
         for p in pages:
@@ -116,14 +114,14 @@ def answer_general_fact(question: str, target: str, store):
             else:
                 # No year (or "last year"): use the earliest full report that the site
                 # treats as the reference year, but always state the year so the answer is honest.
-                chosen = [min(reports, key=lambda r: r[0])] if "last year" in q else [max(reports, key=lambda r: r[0])]
+                chosen = [min(reports, key=lambda r: r[0])] if has("last_year", q) else [max(reports, key=lambda r: r[0])]
             year, count, page, sentence = chosen[0]
             answer = "{} Dupaco employees used Volunteer Time Off in {}.".format(count, year)
             return Answer(text=answer, sources=source(page, re.sub(r"\*", "", sentence)), confident=True)
 
-    if "forbes" in q and re.search(r"\b(recogni[sz]ed|recognition|award|rank|ranked|named|top)\b", q):
+    if has("forbes_entity", q) and has("forbes_action", q):
         # Pick the Forbes article whose headline matches the question (credit union vs employer).
-        wants_employer = bool(re.search(r"\b(employer|workplace|work)\b", q))
+        wants_employer = has("forbes_employer_subject", q)
         articles = []
         for p in pages:
             if "forbes" not in p["url"].lower():
@@ -154,18 +152,18 @@ def answer_general_fact(question: str, target: str, store):
                 text += " (published {})".format(published.group(1))
             return Answer(text=text, sources=source(page, text), confident=True)
 
-    if re.search(r"\b(join|become (?:a |an )?(?:dupaco )?(?:new )?member)\b", q) and re.search(r"\b(online|website|link|url)\b", q):
+    if all_of(q, "join_action", "online_link_context"):
         page = page_by_path("/about/join")
         if page:
             link = re.search(r"https://join\.dupaco\.com/?", page["text"])
             if link:
                 return Answer(text=link.group(0), sources=source(page, link.group(0)), confident=True)
 
-    asked_rate = re.search(r"(\d+(?:\.\d+)?)\s?%", q)
-    if asked_rate and re.search(r"\b(any|which|is there|does|do)\b", q) and re.search(r"\b(tier|tiers|account|accounts|savings|pay|pays)\b", q):
+    asked_rate = re.search(INTENTS["rate_amount"][0], q)
+    if asked_rate and all_of(q, "any_tier_query", "tier_entity"):
         # Search every deposit tier on the rate sheet for the asked APY instead of assuming no.
         value = float(asked_rate.group(1))
-        scope = "share savings" if "share savings" in q else ("savings" if "savings" in q else None)
+        scope = "share savings" if has("share_savings_product", q) else ("savings" if has("savings_domain", q) else None)
         matches, scoped_rows = [], []
         for r in store.rows_by_snapshot.get(target, []):
             if urlparse(r["url"]).path.lower().rstrip("/") != "/rates" or "Balance Tier" not in r.get("cells", {}):
