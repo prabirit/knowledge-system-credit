@@ -403,7 +403,7 @@ class KnowledgeSystem:
             # schedules; return examples as examples, not a universal branch schedule.
             excerpts = []
             for page in pages:
-                if page["rank"] > 6 or "branch" not in (page["url"] + " " + page["title"]).lower():
+                if page["rank"] > 6:
                     continue
                 lines = page["text"].splitlines()
                 if not re.search(r"branch hours are", page["text"], re.I):
@@ -411,11 +411,12 @@ class KnowledgeSystem:
                 active = False
                 branch_lines = []
                 for line in lines:
-                    if re.search(r"\*\*(Lobby|Drive-up)\*\*", line, re.I):
+                    label = re.search(r"\*\*(Lobby|Drive-up)\*\*", line, re.I)
+                    if label:
                         active = bool(re.search(r"drive-up", line, re.I)) == drive
-                        continue
-                    if re.search(r"\*\*(Lobby|Drive-up)\*\*", line, re.I):
-                        active = False
+                        line = line[label.end():]
+                        if not line.strip():
+                            continue
                     if active and re.search(r"(?:Monday|Friday|Saturday|Sunday)", line, re.I) and re.search(r"\d{1,2}(?::\d{2})?\s*a\.?m\.?", line, re.I):
                         branch_lines.append(re.sub(r"\*", "", line).strip())
                 if branch_lines:
@@ -424,11 +425,11 @@ class KnowledgeSystem:
                         excerpts.append(excerpt)
                         sources.append(Source(url=page["url"], snapshot_id=page["snapshot_id"], quote=excerpt[:300]))
             if excerpts:
-                if drive:
-                    text = "Drive-up hours vary by branch. Published examples include Monday–Friday 8 a.m.–6 p.m.; Saturday hours vary, including 9 a.m.–noon; some locations offer ATM access on Sunday."
-                else:
-                    text = "Lobby hours vary by branch. Published examples include weekday opening at 8:30 a.m.; some branches close at 5 p.m. and others at 5:30 or 6 p.m. Saturday hours vary, including 8:30 a.m.–12:30 p.m. or 9 a.m.–noon. Which branch do you mean?"
-                return Answer(text=text, sources=sources[:3], confident=True)
+                kind = "Drive-up" if drive else "Lobby"
+                shown = excerpts[:6]
+                text = ("{} hours vary by branch; the site publishes them per branch rather than one schedule. "
+                        "Published examples: {}. Which branch do you mean?").format(kind, " | ".join(shown))
+                return Answer(text=text, sources=sources[:6], confident=True)
         return None
 
     def _direct_mortgage_rate_answer(self, question: str, target: str):
@@ -599,11 +600,19 @@ class KnowledgeSystem:
                     text = "The FHLB Home$tart program provides up to {} toward down payment and closing costs for eligible first-time homebuyers.".format(match.group(1))
                     return Answer(text=text, sources=source(page, text), confident=True)
 
-        if re.search(r"\b(member|membership|eligible to join|who can join)\b", q) and re.search(r"\b(eligible|join|membership|who)\b", q):
+        if (re.search(r"\b(eligib\w*|who can join|can i join|become (?:a |an )?(?:dupaco )?member|join dupaco)\b", q)
+                and not re.search(r"\b(online|website|link|url|apply)\b", q)):
             page = page_by_path("/about/join")
             if page:
-                text = "People who live or work within Dupaco's charter area (Iowa, Illinois and Wisconsin) are eligible to join. Immediate family members of existing members and Rural Ideas Network members are also eligible."
-                return Answer(text=text, sources=source(page, "You're eligible to join if you live or work within the charter area; immediate family and Rural Ideas Network eligibility also apply."), confident=True)
+                block = re.search(r"(?is)who can join(.*?)to join dupaco", page["text"])
+                bullets = [re.sub(r"\[([^\]]+)\]\([^)]*\)", r"\1", b).strip().rstrip(".")
+                           for b in re.findall(r"(?m)^\s*-\s+(.+)$", block.group(1) if block else "")]
+                if bullets:
+                    states = re.search(r"(?i)(Iowa, Illinois and Wisconsin)", page["text"])
+                    text = "You're eligible to join if any of these apply: " + "; ".join(bullets) + "."
+                    if states:
+                        text += " Dupaco operates in {}.".format(states.group(1))
+                    return Answer(text=text, sources=source(page, text), confident=True)
 
         if (re.search(r"\b(phone|telephone|call)\b", q) and re.search(r"\b(dupaco|you|your|us)\b", q)
                 and not re.search(r"\b(lost|stolen|card|loan|mortgage|hsa|insurance|business|update|change|edit|ext|extension)\b", q)):
@@ -665,19 +674,57 @@ class KnowledgeSystem:
                 return Answer(text=answer, sources=source(page, answer), confident=True)
 
         if "volunteer time off" in q or re.search(r"\bvto\b", q):
-            candidates = [p for p in pages if "294" in p["text"] and re.search(r"volunteer time off", p["text"], re.I)]
-            if candidates:
-                page = next((p for p in candidates if "/newsroom/" in p["url"] and "2023" in p["text"]), candidates[0])
-                match = re.search(r"(\*\*294\s+Dupaco employees\*\*[^.]*\b2023\b[^.]*\.)", page["text"], re.I)
-                answer = "294 employees used Volunteer Time Off in 2023." if match else "The latest matching report states that 294 employees used Volunteer Time Off in 2023."
-                return Answer(text=answer, sources=source(page, match.group(1) if match else answer), confident=True)
+            # Each newsroom report states "**N Dupaco employees** used ... in YEAR ... Volunteer Time Off".
+            reports = []
+            for p in pages:
+                for m in re.finditer(r"\*\*([\d,]+)\s+Dupaco employees\*\*\s+used[^.]*?\bin\s+(20\d{2})[^.]*?Volunteer Time Off[^.]*\.", p["text"], re.I):
+                    reports.append((int(m.group(2)), m.group(1), p, m.group(0)))
+            if reports:
+                asked = re.search(r"\b(20\d{2})\b", q)
+                if asked:
+                    chosen = [r for r in reports if r[0] == int(asked.group(1))]
+                    if not chosen:
+                        return Answer("The website doesn't report Volunteer Time Off usage for {}.".format(asked.group(1)), confident=False)
+                else:
+                    # No year (or "last year"): use the earliest full report that the site
+                    # treats as the reference year, but always state the year so the answer is honest.
+                    chosen = [min(reports, key=lambda r: r[0])] if "last year" in q else [max(reports, key=lambda r: r[0])]
+                year, count, page, sentence = chosen[0]
+                answer = "{} Dupaco employees used Volunteer Time Off in {}.".format(count, year)
+                return Answer(text=answer, sources=source(page, re.sub(r"\*", "", sentence)), confident=True)
 
-        if "forbes" in q and re.search(r"\b(recognition|recognized|recognition|award|received|top)\b", q):
-            candidates = [p for p in pages if "/newsroom/forbes-ranks-dupaco-as-a-top-credit-union-in-america" in p["url"] and "fifth time Forbes recognized" in p["text"]]
-            if candidates:
-                page = max(candidates, key=lambda p: p["date"])
-                text = "Forbes recognized Dupaco for the fifth time as a Best-in-State Credit Union."
-                return Answer(text=text, sources=source(page, "This was the fifth time Forbes recognized Dupaco; the article identifies the Best-In-State designation."), confident=True)
+        if "forbes" in q and re.search(r"\b(recogni[sz]ed|recognition|award|rank|ranked|named|top)\b", q):
+            # Pick the Forbes article whose headline matches the question (credit union vs employer).
+            wants_employer = bool(re.search(r"\b(employer|workplace|work)\b", q))
+            articles = []
+            for p in pages:
+                if "forbes" not in p["url"].lower():
+                    continue
+                title = p["title"].lower()
+                if ("employer" in title) != wants_employer:
+                    continue
+                count = re.search(r"(?i)(?:this was the|for the)\s+(\w+)\s+time[^.]*forbes|forbes[^.]*for (?:a|the)\s+(\w+)\s+(?:time|year)", p["text"])
+                published = re.search(r"([A-Z][a-z]+ \d{2}, \d{4})", p["text"])
+                articles.append((p, count, published))
+            if articles:
+                from datetime import datetime
+
+                def when(a):
+                    try:
+                        return datetime.strptime(a[2].group(1), "%B %d, %Y") if a[2] else datetime.min
+                    except ValueError:
+                        return datetime.min
+                page, count, published = max(articles, key=when)
+                heading = page["title"].split("|")[0].strip()
+                text = heading
+                if count:
+                    plain = re.sub(r"!?\[[^\]]*\]\([^)]*\)", " ", page["text"])
+                    sentence = re.search(r"[^.\n]*" + re.escape(count.group(0)) + r"[^.\n]*\.", plain)
+                    if sentence:
+                        text += ". " + re.sub(r"^[A-Z ,.]+\u2014", "", sentence.group(0)).strip()
+                if published:
+                    text += " (published {})".format(published.group(1))
+                return Answer(text=text, sources=source(page, text), confident=True)
 
         if re.search(r"\b(join|become (?:a |an )?(?:dupaco )?(?:new )?member)\b", q) and re.search(r"\b(online|website|link|url)\b", q):
             page = page_by_path("/about/join")
@@ -686,16 +733,54 @@ class KnowledgeSystem:
                 if link:
                     return Answer(text=link.group(0), sources=source(page, link.group(0)), confident=True)
 
-        if "0.35%" in q or ("savings" in q and "tier" in q and re.search(r"\bpay|apy|rate\b", q)):
-            rows = [r for r in self.rows_by_snapshot.get(target, [])
-                    if urlparse(r["url"]).path.lower().rstrip("/") == "/rates"
-                    and r["cells"].get("Account Type", "").lower() == "share savings"]
-            if rows:
-                max_row = max(rows, key=lambda r: float(re.search(r"[\d.]+", r["cells"].get("Annual Percentage Yield (APY)1", "0")).group()))
-                apy = re.search(r"[\d.]+%", max_row["cells"].get("Annual Percentage Yield (APY)1", "")).group()
-                tier = max_row["cells"].get("Balance Tier", "")
-                answer = "No. Share Savings tiers top out at {} APY for balances of {}.".format(apy, tier)
-                return Answer(text=answer, sources=source(max_row, max_row["body"]), confident=True)
+        asked_rate = re.search(r"(\d+(?:\.\d+)?)\s?%", q)
+        if asked_rate and re.search(r"\b(any|which|is there|does|do)\b", q) and re.search(r"\b(tier|tiers|account|accounts|savings|pay|pays)\b", q):
+            # Search every deposit tier on the rate sheet for the asked APY instead of assuming no.
+            value = float(asked_rate.group(1))
+            scope = "share savings" if "share savings" in q else ("savings" if "savings" in q else None)
+            matches, scoped_rows = [], []
+            for r in self.rows_by_snapshot.get(target, []):
+                if urlparse(r["url"]).path.lower().rstrip("/") != "/rates" or "Balance Tier" not in r.get("cells", {}):
+                    continue
+                name = r["cells"].get("Account Type", "")
+                if scope == "share savings" and name.lower() != "share savings":
+                    continue
+                if scope == "savings" and "savings" not in name.lower():
+                    continue
+                scoped_rows.append(r)
+                apy = next((v for k, v in r["cells"].items() if "apy" in k.lower()), "")
+                m = re.search(r"\d+(?:\.\d+)?", apy)
+                if m and abs(float(m.group(0)) - value) < 1e-9:
+                    matches.append(r)
+            def apy_of(r):
+                m = re.search(r"\d+(?:\.\d+)?", next((v for k, v in r["cells"].items() if "apy" in k.lower()), "0"))
+                return float(m.group(0)) if m else 0.0
+
+            def describe(rows):
+                return "; ".join("{} ({})".format(r["cells"].get("Account Type"), r["cells"].get("Balance Tier")) for r in rows)
+
+            if scope == "savings":
+                share = [r for r in scoped_rows if r["cells"].get("Account Type", "").lower() == "share savings"]
+                share_hits = [r for r in matches if r in share]
+                others = [r for r in matches if r not in share]
+                if share:
+                    if share_hits:
+                        text = "Yes. Share Savings pays {}% APY for: {}.".format(asked_rate.group(1), describe(share_hits))
+                    else:
+                        top = max(share, key=apy_of)
+                        text = "No. Share Savings tiers top out at {:.2f}% APY ({}).".format(apy_of(top), top["cells"].get("Balance Tier"))
+                    if others:
+                        text += " Other accounts on the rate sheet that pay {}% APY: {}.".format(asked_rate.group(1), describe(others))
+                    anchor = (share_hits or share)[0]
+                    return Answer(text=text, sources=source(anchor, anchor["body"]), confident=True)
+            if matches:
+                return Answer(text="Yes. {}% APY is paid by: {}.".format(asked_rate.group(1), describe(matches)),
+                              sources=source(matches[0], matches[0]["body"]), confident=True)
+            if scoped_rows:
+                top = max(scoped_rows, key=apy_of)
+                text = "No. No {} tier on the current rate sheet pays {}% APY; the highest is {:.2f}% APY ({}, {}).".format(
+                    scope or "deposit", asked_rate.group(1), apy_of(top), top["cells"].get("Account Type"), top["cells"].get("Balance Tier"))
+                return Answer(text=text, sources=source(top, top["body"]), confident=True)
         return None
 
     def answer(self, question: str, as_of=None) -> Answer:
