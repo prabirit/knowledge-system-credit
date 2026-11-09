@@ -1,33 +1,31 @@
-# Knowledge System: Plan & Architecture
+# Knowledge System: Architecture (as built)
 
-A system that reads five dated snapshots of a credit-union website and answers members'
-questions with the **current, correctly-tiered value**, a **source**, and an honest
-**"I don't know"** when the site doesn't say.
+A deterministic Python system that reads five dated snapshots of a credit-union website and
+answers member questions with the **current, correctly-tiered value**, a **source**, and an honest
+**"the website doesn't list that"** when the site doesn't say.
+
+This document describes the code in `submission/solution.py` as it exists. Section 9 records how
+it differs from the original plan and why.
 
 ---
 
-## 1. Requirements (from the assignment PDF and the harness)
+## 1. Requirements
 
 | Item | Requirement |
 |---|---|
-| Deliverable | Folder with `solution.py` exposing `build()` → object with `ingest()`, `answer()`, `conflicts()` |
-| Contract | `harness/contract.py` (`Snapshot`, `Page`, `Answer`, `Source`, `Conflict`). Don't rename anything. |
-| Extras | `requirements.txt` (clean **Python 3.11** env), `NOTES.md` (approach + API keys) |
-| Submission | GitHub repo + commit; any folder except `starter/` |
-| Rules | Answer only from snapshots, no live web calls; each `answer()` < 60 s; ingest < 30 min; don't redistribute data |
+| Deliverable | `solution.py` exposing `build()` → object with `ingest()`, `answer()`, `conflicts()` |
+| Contract | `harness/contract.py` (`Snapshot`, `Page`, `Answer`, `Source`, `Conflict`) |
+| Extras | `requirements.txt`, `NOTES.md` (approach + API keys); graded in a clean **Python 3.11** env |
+| Rules | Snapshots only, no live web calls; each `answer()` < 60 s; ingest < 30 min; don't redistribute data |
 
 ### Scoring (`harness/scoring.py`)
 
-| Pillar | Weight | How it is measured |
+| Pillar | Weight | Measured as |
 |---|---|---|
 | Accuracy | 55% | Share of `must_include` values present; **any `must_not_include` value → 0**. Item = 0.85·correctness + 0.15·source hit |
-| Conflicts | 15% | 0.7·F1 vs hidden gold list + 0.3·correct winner (match = ≥2 gold values, or 1 value + topic keyword) |
-| Consistency | 15% | Same numeric values across paraphrases and across a repeat pass (× accuracy) |
-| Speed | 15% | p95 latency ≤ 2 s → 1.0, linear to 0 at 20 s (× accuracy) |
-
-Notes:
-- `should_refuse` questions get credit only if the answer declines **and contains no numbers** beyond those in the question.
-- Numbers are compared by value (`5.39%` == `5.390 %`). Hedging with several values fails.
+| Conflicts | 15% | 0.7·F1 vs hidden gold list + 0.3·correct winner |
+| Consistency | 15% | Same numeric values across paraphrases and a repeat pass (× accuracy) |
+| Speed | 15% | p95 ≤ 2 s → 1.0, linear to 0 at 20 s (× accuracy) |
 
 ### Data
 
@@ -39,42 +37,32 @@ Notes:
 | `04_2026-08-27_rebaseline` | 27 Aug 2026 | 683 |
 | `05_2026-09-28_latest` | 28 Sep 2026 ("current") | 705 |
 
-About 6.5 MB of markdown per snapshot. Most of it is noise: ~255 blog pages and ~166 newsroom pages.
-The authoritative facts sit on a few pages: `/rates`, `/business-rates`, product pages, and branch pages.
-
-### Practice questions (40)
-
-| Category | n | Main challenge |
-|---|---|---|
-| stale_trap | 7 | Old page / calculator / press release shows an outdated value |
-| tier_disambiguation | 6 | Pick the right term / balance / loan-amount tier |
-| branch_info | 6 | Hours, addresses |
-| list_completeness | 4 | List every item (e.g., all four credit cards) |
-| entity_attribution | 4 | Right fact for the right product/entity |
-| temporal_as_of | 4 | Answer as the site stood on a date |
-| conflict_resolution | 3 | Pick the winning value |
-| current_value | 3 | Latest value |
-| should_refuse | 3 | Site doesn't say → decline, no numbers |
-
 ---
 
 ## 2. Design decisions
 
 | Decision | Choice | Why |
 |---|---|---|
-| Agent? | **No** | Fixed call sequence, no tool use. An agent adds latency and non-determinism. |
-| LLM? | **Not required** (optional add-on) | Rules are fast, deterministic and keyless. The grader may have no API key. |
-| RAG vs knowledge graph | **Temporal fact store + BM25** | Plain RAG can't tell stale or wrong-tier values apart. A full KG is overkill. A fact table keyed by qualifiers, with history, is a lightweight KG. |
-| Database? | **None, in memory** | ~3,300 page versions; rebuilt by `ingest()` each run; no DB server exists in the grader env. |
-| Libraries | stdlib (+ optional `rank-bm25`) | Clean 3.11 install, no network |
+| Agent? | No | Fixed call sequence and no tool use; an agent adds latency and non-determinism |
+| LLM? | No | Rules are fast, repeatable and keyless; the grader has no guaranteed API key |
+| RAG vs knowledge graph | Table-row index + targeted rules + keyword fallback | Similarity search can't tell a stale calculator value from the official rate, or two tiers apart |
+| Database | None; in memory | ~3,300 page versions, rebuilt by `ingest()` on every scorer run |
+| Libraries | Python standard library only | Clean 3.11 install, offline |
 
-### Source-ranking rules ("what is current")
+### Source authority (`_page_rank`)
 
-1. Official rates page > product page > promo/landing page > calculator > blog > newsroom > files.
-2. Same rank → newer snapshot / newer in-page effective date wins.
-3. Expired offer pages ("Offer Has Expired") lose.
-4. Different term / tier / model year / rate-vs-APY / personal-vs-business = **different facts, not conflicts**.
-5. No supporting fact → refuse (no numbers in the refusal).
+| Rank | Page type | Detected by |
+|---|---|---|
+| 1 | Official rate sheet | `/rates`, `/business-rates`, `/rates/...` |
+| 2 | Product / service pages | `/personal/...`, `/business/...`, `/about/...`, `/contact` |
+| 3 | Promo / landing | `*-lp`, `/switch-and-earn`, `offer` in path |
+| 4 | Calculator | `calculator` in path |
+| 5 | Blog / education | `/learn/...`, `/business/resources/...` |
+| 6 | Newsroom | `/newsroom/...`, `/20xx/...` |
+| 7 | Files | `/hubfs/...` |
+| 99 | Expired | "Offer has expired" title, or "offer ended YYYY-MM-DD" in text |
+
+Lower rank wins. Ties go to the newer snapshot. Unmatched paths default to rank 5. The checks run in a fixed order, so a calculator under `/personal/...` is still rank 4.
 
 ---
 
@@ -83,202 +71,127 @@ The authoritative facts sit on a few pages: `/rates`, `/business-rates`, product
 ```mermaid
 flowchart TB
     H["Scorer<br/>harness/run_eval.py"]
-    C1["Call 1: ingest snapshot<br/>5 times, oldest first"]
-    C2["Call 2: answer question, as_of"]
-    C3["Call 3: conflicts"]
+    C1["ingest snapshot<br/>5 times, oldest first"]
+    C2["answer question, as_of"]
+    C3["conflicts"]
     H --> C1
     H --> C2
     H --> C3
 
-    subgraph ING["Ingest pipeline"]
+    subgraph ING["Ingest (per snapshot)"]
         direction TB
-        PC["1. Page Classifier<br/>rank, expired, publish date, dedupe"]
-        SS["2. Section Splitter<br/>table, hours, address, footnote, prose"]
-        FE["3. Fact Extractor<br/>rules + regex"]
-        CH["4. Chunker<br/>prose sections"]
-        HM["History Merger<br/>valid_from, valid_to"]
-        PC --> SS
-        SS --> FE
-        SS --> CH
-        FE --> HM
+        PR["Page authority rank<br/>_page_rank"]
+        TR["Table-row parser<br/>_table_rows"]
+        CH["Prose chunker<br/>_chunks"]
+        PR --> TR
+        PR --> CH
     end
 
     subgraph STORE["In-memory store"]
         direction TB
         S1[("snapshots<br/>id, date")]
-        S2[("pages<br/>url to versions")]
-        S3[("facts<br/>key to value history")]
-        S4[("index<br/>BM25 per snapshot")]
-        S5[("aliases.json")]
+        S2[("pages_by_snapshot")]
+        S3[("rows_by_snapshot<br/>cells, rank, effective date")]
+        S4[("passages_by_snapshot<br/>terms, expiry date")]
     end
 
     subgraph ANS["Answer path"]
         direction TB
-        QP["5. Query Parser<br/>intent, domain, attribute,<br/>qualifiers, date, answer type"]
-        SEL["6. Snapshot Selector<br/>latest snapshot on or before date"]
-        FL["7. Fact Lookup + Ranker<br/>filter by key, rank, pick winner"]
-        FB["BM25 prose fallback"]
-        RB["8. Refusal Gate + Answer Builder<br/>template, cite URL, conflict note"]
-        QP --> SEL --> FL
-        FL -->|no fact| FB --> RB
-        FL -->|fact found| RB
+        SEL["1. Snapshot selector<br/>latest on or before date"]
+        DEC["2. Decline gate<br/>unpublished rates or branches"]
+        RH["3. Targeted handlers<br/>rates, branches, mortgage,<br/>product lists, prose facts"]
+        FB["4. Keyword fallback<br/>IDF-weighted, authority-boosted"]
+        SEL --> DEC --> RH
+        RH -->|no handler matched| FB
     end
 
     subgraph CON["Conflicts"]
-        CD["9. Conflict Detector<br/>same key, different values,<br/>different pages<br/>resolve by rank + recency"]
+        FK["Fact keys<br/>product, qualifiers, attribute"]
+        CD["Current-snapshot disagreements<br/>+ stale model-year rows"]
+        FK --> CD
     end
 
-    C1 --> PC
-    C2 --> QP
-    C3 --> CD
-
-    PC --> S2
-    HM --> S3
+    C1 --> PR
+    TR --> S3
     CH --> S4
+    PR --> S2
+    C2 --> SEL
     S1 --> SEL
-    S5 --> QP
-    S3 --> FL
+    S2 --> RH
+    S3 --> RH
     S4 --> FB
-    S3 --> CD
+    C3 --> FK
+    S3 --> FK
 
-    RB --> OUT1["Answer<br/>text, sources, confident, conflict_note"]
+    RH --> OUT1["Answer<br/>text, sources, confident"]
+    FB --> OUT1
+    DEC --> OUT1
     CD --> OUT2["List of Conflict<br/>topic, values, sources, resolution, reason"]
 ```
 
 ---
 
-## 4. Ingest pipeline
+## 4. Ingest
 
-```mermaid
-flowchart LR
-    SNAP["Snapshot<br/>e.g. 05_2026-09-28<br/>705 pages"] --> PC
-    PC["Page Classifier"] --> SS["Section Splitter"]
-    SS -->|"rate table, hours,<br/>address, footnote"| FE["Fact Extractor"]
-    SS -->|"prose"| CH["Chunker"] --> IDX[("BM25 index")]
-    FE --> HM{"History Merger"}
-    HM -->|"same value"| EXT["extend valid_to"]
-    HM -->|"new value"| NEW["close old range,<br/>open new range"]
-    HM -->|"fact missing in<br/>full snapshot"| WD["mark possibly withdrawn"]
-    EXT --> F[("facts{}")]
-    NEW --> F
-    WD --> F
-```
+For each snapshot, every page becomes a record with its URL, title, text, snapshot id/date and
+authority rank. From each page:
 
-### 4.1 Page classification
+- **Table rows** (`_table_rows`): each Markdown table row keeps its header→cell mapping, the nearest
+  heading, and any "effective as of MM/DD/YYYY" date found near the table.
+- **Prose passages** (`_chunks`): paragraphs split at headings, each with a keyword set and any
+  "offer ended YYYY-MM-DD" expiry date.
 
-| Rank | Type | Detected by | ~Count (snap 05) |
-|---|---|---|---|
-| 1 | Official rates | `/rates`, `/business-rates`; "effective as of" tables | 2 |
-| 2 | Product / service | `/personal/...`, `/business/...` (not `/resources`), `/about`, `/contact` | ~60 |
-| 3 | Promo / landing | `*-lp`, `/switch-and-earn` | ~10 |
-| 4 | Calculator | `calculators` in path | 34 |
-| 5 | Blog / education | `/learn/...`, `/business/resources/...` | 255+ |
-| 6 | Newsroom / PR | `/newsroom/...`, `/20xx/...` | 166 |
-| 7 | Files | `/hubfs/*.pdf`, `.xlsx` | 28 |
-| X | Expired / listing | title "Offer Has Expired"; author/tag pages | few |
-
-Also stored: publish date (news/blog), expired flag, duplicate-URL groups
-(e.g., `/personal/loans/auto-loans/` = `/personal/loans/auto-motorcycle-loans`).
-
-### 4.2 Section classification
-
-| Section | Signal | Output |
-|---|---|---|
-| Rate table | Markdown table with `%` + headers Rate/APY/APR/Term/Minimum | One fact per row |
-| Hours block | `Mon–Fri 9 a.m.–5 p.m.`, "Lobby", "Drive-up" | Hours facts |
-| Address / contact | Street/ZIP/phone, "routing number" | Branch / contact facts |
-| Footnote | Superscript-number lines (`1Fixed Jumbo…`) | Qualifiers attached to rows |
-| Prose | everything else | BM25 chunks |
-
-### 4.3 Fact record
-
-```python
-key = (domain, product, attribute, qualifiers)
-# e.g. ("certificate", "10 month fixed jumbo special", "apy", "min $100,000")
-
-facts[key] = [
-  {"value": "3.90%", "valid_from": "2026-05-12", "valid_to": "2026-08-27",
-   "url": "https://www.dupaco.com/rates", "rank": 1, "effective": None,
-   "snapshot": "01_2026-05-12_baseline", "quote": "| 10 Month Fixed Jumbo ... |"},
-  {"value": "4.00%", "valid_from": "2026-09-28", "valid_to": None, ...},
-]
-```
-
-Qualifiers keep tiers apart, e.g. mortgage 30-yr ≤ $100k (7.13%) vs ≤ $832,750 (7.25%)
-are **two facts**, not a conflict.
+Everything is held per snapshot (`rows_by_snapshot`, `passages_by_snapshot`, `pages_by_snapshot`),
+so an `as_of` question simply reads a different snapshot. Nothing is merged across snapshots for
+answering; history *is* the set of snapshots.
 
 ---
 
 ## 5. Answer path
 
 ```mermaid
-sequenceDiagram
-    participant S as Scorer
-    participant QP as Query Parser
-    participant SEL as Snapshot Selector
-    participant FL as Fact Lookup + Ranker
-    participant BM as BM25 Fallback
-    participant AB as Answer Builder
-
-    S->>QP: "10-month jumbo special rate as of May 2026?"
-    QP->>SEL: domain=certificate, attr=apy, date=2026-05-31, type=single
-    SEL->>FL: snapshot 02_2026-05-19
-    FL->>FL: filter key, keep facts valid on date, rank
-    alt fact found
-        FL->>AB: 3.90% (/rates, rank 1)
-    else no fact
-        FL->>BM: search prose chunks
-        BM->>AB: best passage or nothing
-    end
-    AB->>S: Answer("...paid 3.90% APY...", source=/rates@02, confident=True)
-    Note over AB: No support → "It isn't listed; please contact us." (no numbers)
+flowchart TD
+    Q["question, as_of"] --> D{"date from as_of<br/>or 'as of May 2026' in text?"}
+    D -->|"before first snapshot"| N["Decline: no snapshot from that date"]
+    D -->|otherwise| S["Latest snapshot on or before date<br/>(no date = newest)"]
+    S --> G{"Decline gate:<br/>specific rate or branch<br/>with no published evidence?"}
+    G -->|yes| R["Decline, no numbers"]
+    G -->|no| H{"Targeted handler matches?"}
+    H -->|yes| A["Answer from the matching row or page"]
+    H -->|no| K["Keyword fallback over rows + passages<br/>drop expired offers, enforce term / model year"]
+    K -->|"weak match"| R2["Decline"]
+    K --> A2["Best passage or row, with source"]
 ```
 
-### 5.1 Answer types
+### Targeted handlers
 
-| Type | Example | Behaviour |
+Each handler reads its value from the page in the selected snapshot; none returns fixed answer text.
+
+| Handler | Answers | Reads from |
 |---|---|---|
-| single | "60-month auto APR, 2025 model year" | One tier's value |
-| headline | "mortgage rates right now" | Lead with default tier ($100k), don't dump all tiers |
-| list | "what credit cards do you offer" | Every item with its value |
-| url | "link for CD rates" | Current URL, not old one |
-| date/event | "when does Hy-Vee close" | In-page date |
-| prose | "what is Home$tart" | BM25 extractive passage |
-| refuse | "7/1 ARM rate" (not on site) | Decline, no numbers |
+| `_direct_rate_lookup_answer` | Personal-loan APR by term; named deposit product APY/dividend, choosing the tier that contains any $ amount in the question | `/personal/loans/personal-loans`, `/rates` |
+| `_direct_branch_or_checking_answer` | Checking rates; branch/ATM street address by city or street; lobby/drive-up hours (lists every published schedule, asks which branch) | `/rates`, `/contact`, branch newsroom posts |
+| `_direct_mortgage_rate_answer` | Purchase mortgage rates; smallest loan-amount tier containing the requested amount; headline tier for broad questions | `/rates` |
+| `_direct_product_list_answer` | Credit-card APRs (all or a named card); certificate rates (all, or a named term / jumbo); certificate-rates link; mobile wallets | card pages, `/rates`, mobile-payments page |
+| `_direct_general_fact_answer` | Home$tart amount; membership eligibility (bullets from the join page); phone; branch locator URL; branch closure date and alternatives; contact updates; student loans; Volunteer Time Off by year; Forbes recognition (article matching the question); join link; "do any tiers pay X%?" (checks every tier) | the relevant page in the snapshot |
+
+### Keyword fallback
+
+When no handler matches: score table rows and passages by IDF-weighted keyword overlap, boosted by
+authority and domain hints, then enforce hard filters. Expired offers are dropped. Certificate
+questions must match the requested term, and auto-loan questions the requested term and model
+year. If nothing matches in the selected snapshot, older snapshots are tried for prose only. A
+weak best score declines.
 
 ---
 
-## 6. Date handling
+## 6. Dates
 
-```mermaid
-flowchart TD
-    Q["Question + as_of"] --> A{"as_of field set?"}
-    A -->|yes| D["date = as_of"]
-    A -->|no| B{"date phrase in text?"}
-    B -->|"as of May 2026"| D2["date = 2026-05-31<br/>(month → last day)"]
-    B -->|"now / today / current"| D3["date = latest snapshot"]
-    B -->|"last year / last December"| D4["relative to latest snapshot date"]
-    B -->|none| D3
-    D --> R{"date range"}
-    D2 --> R
-    D4 --> R
-    R -->|"before 2026-05-12"| P["no snapshot: use dated page<br/>content if any, else refuse"]
-    R -->|"inside range"| W["latest snapshot ≤ date"]
-    R -->|"after 2026-09-28"| L["latest snapshot +<br/>compare in-page dates"]
-```
-
-- **Website time** = what the site said on date D (snapshot selection).
-- **Content time** = dates written in pages ("effective as of 06/02/2026", "closes March 31, 2026", "in 2023, 294 employees").
-  Stored with facts, and used for questions like *"Is Hy-Vee still open today (October 2026)?"* → closed March 31, 2026.
-- "Last year" answers **always state the year** (e.g., "294 employees (2023)").
-
-Real example, 10-month jumbo special APY on `/rates`:
-
-| Snapshot | 01 | 02 | 03 | 04 | 05 |
-|---|---|---|---|---|---|
-| APY | 3.90% | 3.90% | 3.90% | 3.90% | 4.00% |
-
-"As of May 2026" → snapshot 02 → **3.90%**. No date → snapshot 05 → **4.00%**.
+- **Website time:** answers come from the latest snapshot on or before the date. With no date, the
+  newest snapshot is used. Before 12 May 2026, the system declines.
+- **Content time:** dates written in pages are used where the question needs them: closure dates
+  ("will close March 31, 2026") are compared with the snapshot date, and year-specific facts (e.g.
+  Volunteer Time Off by year) match the year asked. A year the site doesn't report declines.
 
 ---
 
@@ -286,85 +199,54 @@ Real example, 10-month jumbo special APY on `/rates`:
 
 ```mermaid
 flowchart LR
-    F[("facts{}")] --> G["Group by key<br/>(domain, product, attr, qualifiers)"]
-    G --> C{"≥2 distinct values<br/>from different pages<br/>(excluding duplicate URLs)?"}
-    C -->|no| SKIP["not a conflict"]
-    C -->|yes| R["Resolve:<br/>1. page rank<br/>2. effective date / snapshot recency<br/>3. expired → loses"]
-    R --> OUT["Conflict(topic, values, sources,<br/>resolution, reason)"]
+    R[("table rows,<br/>all snapshots")] --> K["Fact key:<br/>product + qualifiers + attribute<br/>(rate vs APY vs APR kept apart)"]
+    K --> N["Normalize values<br/>4.20%1 = 4.2%; 9.59% APR = 9.59%"]
+    N --> C{"Latest snapshot:<br/>2+ distinct values,<br/>one from an official page?"}
+    C -->|yes| W["Winner: highest authority,<br/>then newest"]
+    R --> Y["Model-year rows on calculator / promo pages<br/>vs the official tier they overlap most"]
+    Y --> W
+    W --> O["Conflict: topic, values, sources,<br/>resolution, reason"]
 ```
 
-Example: 60-month auto APR (2024–27 model years):
-`5.39%` on `/rates` (rank 1) and the auto-loan page (rank 2) vs `5.34%` on the vehicle-affordability
-calculator (rank 4) → **resolution 5.39%**, reason *"official rate page; calculator is stale"*.
-
-Precision matters (F1): tiers, rate-vs-APY and duplicate URLs are **not** reported.
+- Only contradictions **within the current snapshot** are reported. A rate that changed between
+  crawls is history, handled by `as_of`, not a self-conflict.
+- Disagreements among calculators and articles alone are skipped, because there's no reliable winner.
+- If a dividend-rate change only mirrors the APY change, only the APY conflict is reported.
 
 ---
 
-## 8. Optional add-ons (not in the required path)
-
-```mermaid
-flowchart LR
-    ING["Ingest"] -.-> LLM["LLM extractor<br/>(cached by page hash)"] -.-> F[("facts{}")]
-    ANS["Answer: rules + BM25 found nothing"] -.-> EMB["Embeddings / LLM query rewriter<br/>(short timeout, rules fallback)"]
-```
-
-Add only if measured misses justify it. Candidates: Gemini free tier, Groq free tier, OpenRouter
-`:free` models, local Ollama, local `fastembed`. Constraints:
-- System must work **with no API key**.
-- Prefer LLM at **ingest** (untimed), not per question (p95 ≤ 2 s).
-- Hosted APIs send page text off-machine. Check the "event only" data rule first.
-
----
-
-## 9. Build plan
-
-| # | Step | Output |
-|---|---|---|
-| 1 | Data exploration: rate-table formats, effective dates, branch data, URL facts across 5 snapshots; hand-label 15–20 conflicts | Notes + `dev/conflicts_gold.json` |
-| 2 | Page classifier + section splitter + fact extractor (qualifiers, in-page dates, per-fact rank) | `facts{}` |
-| 3 | Query parser: intent, qualifiers, dates in text, alias dictionary | Parsed query |
-| 4 | Answer builder: answer types, templates, number-free refusal | `answer()` |
-| 5 | `as_of`, withdrawn facts, URL facts | Temporal correctness |
-| 6 | `conflicts()` from fact store; score vs hand-labelled list | `conflicts()` |
-| 7 | BM25 prose fallback | Prose/list coverage |
-| 8 | Hold-out set: ~3 rewordings per practice question + generated `as_of` tests from snapshot diffs; check consistency and p95 latency | Overfitting guard |
-| 9 | Optional LLM/embeddings for remaining misses | Only if needed |
-| 10 | Clean Python 3.11 venv test, `NOTES.md`, push to GitHub | Submission |
-
-### Proposed layout
-
-```
-my_solution/
-├── solution.py        # build() + KnowledgeSystem (ingest / answer / conflicts)
-├── classify.py        # page + section classification
-├── extract.py         # fact extraction (tables, hours, addresses, URLs, dates)
-├── query.py           # query parser + date resolution
-├── store.py           # fact history, snapshot selection
-├── answer.py          # ranking, answer types, templates, refusal
-├── search.py          # BM25 fallback
-├── aliases.json       # synonyms
-├── requirements.txt
-└── NOTES.md
-```
-
-### Verification
+## 8. Verification
 
 ```bash
-python harness/run_eval.py --submission my_solution --eval eval/public_eval.jsonl
-python harness/run_eval.py --submission my_solution --eval dev/holdout_eval.jsonl
+uv run --python 3.11 python -m unittest submission.test_regressions -v
+python3 harness/run_eval.py --submission submission --eval eval/public_eval.jsonl
+python3 harness/run_eval.py --submission submission --eval dev/holdout_eval.jsonl
+python3 dev/build_eval80.py
+python3 harness/run_eval.py --submission submission --eval dev/eval80.jsonl --conflicts-gold dev/conflicts_gold80.json
 ```
 
-Read `results/per_question.jsonl` for misses and trap hits, not just the total score.
+| Check | What it guards |
+|---|---|
+| `submission/test_regressions.py` | as-of, term decline, conflict history, certificate list completeness, and reworded questions that must use page values |
+| `eval/public_eval.jsonl` | the 40 official practice questions |
+| `dev/holdout_eval.jsonl` | 16 independently worded questions |
+| `dev/eval80.jsonl` | 124 questions whose answers `dev/build_eval80.py` parses from raw snapshots without importing `solution.py` |
+| `harness/selftest` | bundled fixture, including its conflict gold |
+
+The dev sets were used to find and fix bugs, so their scores are regression checks, not
+estimates of hidden-set performance.
 
 ---
 
-## 10. Risks
+## 9. Plan vs. as built
 
-| Risk | Mitigation |
-|---|---|
-| Rules overfit to 40 practice questions | General extractors per page type; reworded hold-out set |
-| Changes between snapshots (e.g., June–Aug gap) not visible | Answer "as the website stood"; documented in `NOTES.md` |
-| Headline vs list scope chosen wrongly | Explicit answer-type rules; test on rewordings |
-| Conflict precision (tiers reported as conflicts) | Full qualifiers in key; duplicate-URL groups |
-| Python 3.14 (dev) vs 3.11 (grader) | Avoid newer syntax; test in 3.11 venv |
+The original plan proposed a richer structure. What was built is simpler where the data allowed it:
+
+| Planned | Built | Reason |
+|---|---|---|
+| Modules: `classify.py`, `extract.py`, `query.py`, `store.py`, `answer.py`, `search.py` | One file, `submission/solution.py` | Simplest drop-in for the scorer; candidate for refactoring (see `NOTES.md`) |
+| `aliases.json` | `ALIASES` dict in code | A handful of synonyms didn't justify a config file |
+| `rank-bm25` library | Hand-written IDF-weighted keyword scorer | Keeps the submission stdlib-only |
+| Unified `facts{}` store with `valid_from`/`valid_to` history, used for answers and conflicts | Answers read per-snapshot rows via handlers; a fact store is built only for conflicts | Per-snapshot indexes made `as_of` trivial; targeted handlers gave more precise tier selection |
+| "History Merger" marking withdrawn facts | Not built; historical prose is a last-resort fallback | Not needed by any observed question |
+| Optional LLM / embeddings | Not used | Rules + fallback covered the dev sets; see risks in `NOTES.md` |
